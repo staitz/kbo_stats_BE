@@ -1,10 +1,10 @@
-import json
+﻿import json
 import os
 import re
 import time
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import requests
@@ -14,7 +14,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-from kbo_hitter_parser_fixed import debug_hitter_shape, parse_hitter_rows
+from kbo_hitter_parser import debug_hitter_shape, parse_hitter_rows
 
 SCHEDULE_PAGE_URL = "https://www.koreabaseball.com/Schedule/Schedule.aspx"
 GET_SCHEDULE_LIST_URL = "https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList"
@@ -63,6 +63,65 @@ def _drain_performance_logs(driver):
         pass
 
 
+def _len_or_none(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (list, dict, str)):
+        try:
+            return len(value)
+        except Exception:
+            return None
+    return None
+
+
+def _safe_json_loads(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return None
+    return value
+
+
+def _debug_table_dump(name: str, raw_value: Any) -> None:
+    print(f"[debug] {name} type={type(raw_value)} len={_len_or_none(raw_value)}")
+    parsed = _safe_json_loads(raw_value)
+    if not isinstance(parsed, dict):
+        return
+    headers = parsed.get("headers") or parsed.get("header") or []
+    if isinstance(headers, list) and headers:
+        print(f"[debug] {name} headers sample={headers[:1]}")
+    rows = parsed.get("rows") or parsed.get("row") or []
+    if isinstance(rows, list) and rows:
+        print(f"[debug] {name} rows[0] sample={rows[0]}")
+
+
+def _fetch_form_endpoint(driver, url: str, payload: Dict[str, str]) -> Tuple[Optional[int], str]:
+    body = urlencode(payload)
+    script = """
+    const url = arguments[0];
+    const body = arguments[1];
+    const done = arguments[arguments.length - 1];
+
+    fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Accept": "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest"
+      },
+      credentials: "include",
+      body: body
+    })
+    .then(r => r.text().then(text => done({ ok: true, status: r.status, text })))
+    .catch(err => done({ ok: false, error: String(err) }));
+    """
+    result = driver.execute_async_script(script, url, body)
+    if not result or not result.get("ok"):
+        raise RuntimeError(f"fetch failed: {result.get('error') if result else 'no result'}")
+    return result.get("status"), result.get("text") or ""
+
+
 def fetch_gamecenter_hitter_data(
     driver,
     game_date: str,
@@ -70,73 +129,109 @@ def fetch_gamecenter_hitter_data(
     away_team: str,
     home_team: str,
     payload_extra: Optional[Dict[str, str]] = None,
-    endpoint: str = "https://www.koreabaseball.com/ws/Game.asmx/GetScoreBoardScroll"
+    endpoints: Optional[List[str]] = None,
+    debug: bool = True,
+    run_parser: bool = True
 ) -> dict:
     """
-    GameCenter 타자 JSON을 Selenium fetch로 받아 Python dict로 반환.
-    data 생성 직후 debug_hitter_shape / parse_hitter_rows 호출 포함.
+    GameCenter ???JSON??Selenium fetch濡?諛쏆븘 Python dict濡?諛섑솚.
+    data ?앹꽦 吏곹썑 debug_hitter_shape / parse_hitter_rows ?몄텧 ?ы븿.
     """
+    gc_url = (
+        "https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx"
+        f"?gameDate={game_date}&gameId={game_id}&section=REVIEW"
+    )
+
+    driver.get(gc_url)
+    _wait_ready(driver, 15)
+
+    if f"gameDate={game_date}" not in (driver.current_url or ""):
+        try:
+            driver.execute_script("window.location.href = arguments[0];", gc_url)
+            _wait_ready(driver, 15)
+        except Exception:
+            pass
+
+    if debug:
+        print(f"[debug] gc_url={gc_url}")
+        print(f"[debug] current_url={driver.current_url}")
+        try:
+            print(f"[debug] cookies={len(driver.get_cookies())}")
+        except Exception:
+            print("[debug] cookies=0")
+        if f"gameDate={game_date}" not in (driver.current_url or ""):
+            print("[debug] warning: query params missing after load")
+
     payload = {
-        "gameDate": str(game_date),
+        "leId": "1",
+        "srId": "0",
+        "seasonId": str(game_date)[:4],
         "gameId": str(game_id),
     }
     if payload_extra:
         payload.update(payload_extra)
-    payload_json = json.dumps(payload, ensure_ascii=False)
 
-    fetch_script = f"""
-    const callback = arguments[arguments.length - 1];
-    fetch("{endpoint}", {{
-        method: "POST",
-        headers: {{
-            "Content-Type": "application/json; charset=UTF-8",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "X-Requested-With": "XMLHttpRequest"
-        }},
-        credentials: "include",
-        body: JSON.stringify({payload_json})
-    }})
-    .then(res => res.text().then(text => callback({{ ok: true, status: res.status, text }})))
-    .catch(err => callback({{ ok: false, error: String(err) }}));
-    """
-    result = driver.execute_async_script(fetch_script)
-    if not result or not result.get("ok"):
-        raise RuntimeError(f"fetch failed: {result.get('error') if result else 'no result'}")
+    if not endpoints:
+        endpoints = [
+            "https://www.koreabaseball.com/ws/Schedule.asmx/GetScoreBoardScroll",
+            "https://www.koreabaseball.com/ws/Schedule.asmx/GetBoxScoreScroll",
+        ]
 
-    raw_text = result.get("text") or ""
-    status = result.get("status")
-    if status and status != 200:
-        print(f"[debug] hitter api http status: {status}")
-    if not raw_text:
-        raise RuntimeError("empty response from GameCenter hitter API")
+    sb_url = endpoints[0]
+    bs_url = endpoints[1] if len(endpoints) > 1 else endpoints[0]
 
-    data = _parse_json_response(raw_text)
-    if data is None:
-        print("[debug] raw_text (first 500):", raw_text[:500])
-        raise RuntimeError("failed to parse GameCenter hitter API response")
-    if isinstance(data, str):
-        try:
-            data = json.loads(data)
-        except Exception as exc:
-            raise RuntimeError("parsed response is a non-JSON string") from exc
-    if isinstance(data, dict) and {"Message", "StackTrace", "ExceptionType"} <= set(data.keys()):
-        print("[debug] server error payload:", data)
-        print("[debug] raw_text (first 500):", raw_text[:500])
-        raise RuntimeError("server returned error payload from GameCenter hitter API")
+    status_sb, raw_sb = _fetch_form_endpoint(driver, sb_url, payload)
+    if debug:
+        print(f"[debug] endpoint=GetScoreBoardScroll status={status_sb}")
+    data_sb = _parse_json_response(raw_sb)
+    if data_sb is None:
+        raise RuntimeError("failed to parse GetScoreBoardScroll response")
 
-    # debug hooks
-    debug_hitter_shape(data)
-    rows = parse_hitter_rows(
-        data=data,
-        game_date=game_date,
-        game_id=game_id,
-        away_team=away_team,
-        home_team=home_team
-    )
-    print(rows[:2])
+    if debug and isinstance(data_sb, dict):
+        for name in ("table1", "table2", "table3"):
+            _debug_table_dump(f"scoreboard.{name}", data_sb.get(name))
 
-    return data
+    sb_ids = {}
+    if isinstance(data_sb, dict):
+        le_id = data_sb.get("LE_ID")
+        sr_id = data_sb.get("SR_ID")
+        season_id = data_sb.get("SEASON_ID")
+        g_id = data_sb.get("G_ID")
+        if le_id and sr_id and season_id and g_id:
+            sb_ids = {
+                "leId": str(le_id),
+                "srId": str(sr_id),
+                "seasonId": str(season_id),
+                "gameId": str(g_id),
+            }
 
+    bs_payload = sb_ids or payload
+    status_bs, raw_bs = _fetch_form_endpoint(driver, bs_url, bs_payload)
+    if debug:
+        print(f"[debug] endpoint=GetBoxScoreScroll status={status_bs}")
+    data_bs = _parse_json_response(raw_bs)
+    if data_bs is None:
+        raise RuntimeError("failed to parse GetBoxScoreScroll response")
+
+    if debug and isinstance(data_bs, dict):
+        debug_hitter_shape(data_bs)
+
+    combined = {
+        "scoreboard": data_sb,
+        "boxscore": data_bs,
+    }
+
+    if run_parser:
+        rows = parse_hitter_rows(
+            data=combined,
+            game_date=game_date,
+            game_id=game_id,
+            away_team=away_team,
+            home_team=home_team
+        )
+        print(rows[:2])
+
+    return combined
 
 def _js_fetch(driver, url, payload_dict):
     body = urlencode(payload_dict)
@@ -384,7 +479,7 @@ def _extract_paren_status(text: str) -> str:
     if not m:
         return ""
     val = m.group(1).strip()
-    if val in {"월", "화", "수", "목", "금", "토", "일"}:
+    if val in {"-", "N/A"}:
         return ""
     return val
 
@@ -393,7 +488,15 @@ def _guess_status(text: str) -> str:
     if not text:
         return ""
     clean = _strip_tags(text)
-    if any(k in clean for k in ["취소", "경기전", "종료", "중계", "서스펜디드", "노게임", "연기"]):
+    if any(
+        k in clean
+        for k in [
+            "\ucde8\uc18c",  # 취소
+            "\uc5f0\uae30",  # 연기
+            "\uc911\ub2e8",  # 중단
+            "\uc11c\uc2a4\ud39c\ub514\ub4dc",  # 서스펜디드
+        ]
+    ):
         return clean
     return ""
 
@@ -402,9 +505,8 @@ def _guess_stadium(text: str) -> str:
     if not text:
         return ""
     clean = _strip_tags(text)
-    if len(clean) <= 6 and re.search(r"[가-힣]", clean):
-        if clean not in {"리뷰", "하이라이트"}:
-            return clean
+    if 0 < len(clean) <= 8 and not re.search(r"\d", clean):
+        return clean
     return ""
 
 
@@ -417,24 +519,17 @@ def _extract_scores(play_text: str) -> List[int]:
 
 def _infer_status(play_text: str, time_text: str = "", relay_text: str = "") -> Tuple[str, float, str]:
     text = _strip_tags(play_text or "")
-    if any(k in text for k in ["취소", "우천", "연기"]):
-        return "취소", 0.9, "keyword_cancel"
-    if any(k in text for k in ["노게임", "서스펜디드", "몰수", "중단"]):
-        return "중단", 0.9, "keyword_suspend"
-
     scores = _extract_scores(play_text or "")
     if len(scores) >= 2:
-        return "종료", 0.8, "score_present"
-
-    relay_clean = _strip_tags(relay_text or "")
-    if any(k in relay_clean for k in ["중계", "LIVE", "진행중"]):
-        return "진행중", 0.7, "relay_hint"
+        return "finished", 0.6, "score_present"
 
     time_clean = _strip_tags(time_text or "")
     if re.search(r"\b([01]?\d|2[0-3]):[0-5]\d\b", time_clean):
-        return "경기전", 0.6, "time_only"
+        return "scheduled", 0.4, "time_only"
 
-    return "미정", 0.3, "no_signal"
+    if text or relay_text:
+        return "unknown", 0.3, "no_signal"
+    return "unknown", 0.1, "empty"
 
 
 def _maybe_enrich_status(
@@ -446,42 +541,7 @@ def _maybe_enrich_status(
     today_only: bool = True,
     debug: bool = False
 ) -> Tuple[str, float, str]:
-    if not game_id:
-        return current_status, confidence, "no_game_id"
-
-    if current_status in {"경기전", "종료", "취소", "중단"} and confidence >= 0.7:
-        return current_status, confidence, "stable_local"
-
-    if today_only:
-        today = datetime.now().strftime("%Y%m%d")
-        if date_yyyymmdd != today:
-            return current_status, confidence, "skip_not_today"
-
-    url = (
-        "https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx"
-        f"?gameDate={date_yyyymmdd}&gameId={game_id}"
-    )
-    try:
-        resp = session.get(url, timeout=10)
-    except Exception:
-        return current_status, confidence, "gc_error"
-
-    if resp.status_code != 200:
-        return current_status, confidence, f"gc_http_{resp.status_code}"
-
-    text = _strip_tags(resp.text)
-    if "경기종료" in text or "종료" in text:
-        return "종료", 0.9, "gc_text_end"
-    if "경기전" in text or "예정" in text:
-        return "경기전", 0.9, "gc_text_before"
-    if "취소" in text or "우천" in text:
-        return "취소", 0.9, "gc_text_cancel"
-    if "중계중" in text or "LIVE" in text or "진행중" in text:
-        return "진행중", 0.8, "gc_text_live"
-    if "노게임" in text or "서스펜디드" in text:
-        return "중단", 0.8, "gc_text_suspend"
-
-    return current_status, confidence, "gc_no_signal"
+    return current_status, confidence, "skip_enrich"
 
 
 def _class_buckets(rows: List[dict]) -> Dict[str, List[str]]:
@@ -708,3 +768,4 @@ def fetch_day_schedule(
         enrich_status=enrich_status,
         enrich_today_only=enrich_today_only
     )
+

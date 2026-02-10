@@ -1,4 +1,5 @@
-﻿from kbo_api import _make_driver, _wait_ready, fetch_gamecenter_hitter_data
+﻿from kbo_api import _make_driver, fetch_gamecenter_hitter_data
+from kbo_hitter_parser import parse_hitter_rows
 
 
 def main():
@@ -7,28 +8,34 @@ def main():
     away_team = "삼성"
     home_team = "KIA"
 
-    url = (
-        "https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx"
-        f"?gameDate={game_date}&gameId={game_id}"
-    )
-
     driver = _make_driver(headless=False)
     try:
-        driver.get(url)
-        _wait_ready(driver, 15)
-
-        _ = fetch_gamecenter_hitter_data(
+        data = fetch_gamecenter_hitter_data(
             driver=driver,
             game_date=game_date,
             game_id=game_id,
             away_team=away_team,
-            home_team=home_team
+            home_team=home_team,
+            debug=True,
+            run_parser=False,
         )
     finally:
         driver.quit()
 
+    rows = parse_hitter_rows(
+        data=data,
+        game_date=game_date,
+        game_id=game_id,
+        away_team=away_team,
+        home_team=home_team,
+    )
+
+    print(rows[:2])
+    if rows:
+        print("[ok] parse_hitter_rows returned non-empty rows")
+    else:
+        print("[fail] parse_hitter_rows returned empty rows")
+
 
 if __name__ == "__main__":
     main()
-
-
