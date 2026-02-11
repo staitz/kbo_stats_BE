@@ -20,16 +20,21 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    import pandas as pd
+except Exception:  # pragma: no cover - optional dependency
+    pd = None
+
 
 EVENT_RULES = {
-    "ignore_tokens": {"", " "},
+    "ignore_tokens": {"", " ", "-", "0"},
     "bb": ["4구"],
     "so": ["삼진"],
     "hbp": ["사구"],
     "sf": ["희비", "희플"],
     "double": ["우2", "좌2", "중2", "2루타"],
     "triple": ["우3", "좌3", "중3", "3루타"],
-    "hr": ["홈런"],
+    "hr": ["홈런", "홈"],
     # keep this simple and extend as needed
     # NOTE: "좌비/우비/중비/2비" are fly-out markers, not hits.
     "single_tokens": ["안타", "1안", "좌전안타", "우전안타", "중전안타", "내야안타", "번트안타", "1루타"],
@@ -40,6 +45,35 @@ SINGLE_REGEXES = [
     re.compile(r"안타"),
     re.compile(r"1루타"),
 ]
+
+HITTER_COLUMN_ALIASES = {
+    "player_name": [
+        "선수", "선수명", "이름", "타자", "타격", "player", "batter", "playername"
+    ],
+    "team": [
+        "팀", "구단", "team", "club"
+    ],
+    "AB": ["타수", "ab"],
+    "H": ["안타", "h"],
+    "2B": ["2루타", "2b", "2루"],
+    "3B": ["3루타", "3b", "3루"],
+    "HR": ["홈런", "hr"],
+    "BB": ["볼넷", "bb", "4구"],
+    "HBP": ["사구", "hbp"],
+    "SF": ["희비", "희플", "희생플라이", "sf"],
+    "R": ["득점", "r", "run"],
+    "RBI": ["타점", "rbi"],
+    "TB": ["루타", "tb", "totalbases", "totalbase"],
+    "PA": ["타석", "pa"],
+    "SB": ["도루", "sb"],
+    "CS": ["도루사", "cs"],
+    "GDP": ["병살", "병살타", "gdp"],
+    "SO": ["삼진", "so"],
+}
+
+# 헤더에서 최소 2개 이상 잡히면 타자 테이블로 인식
+HITTER_TABLE_TOKENS = ["타수", "ab", "안타", "h", "홈런", "hr", "삼진", "so", "볼넷", "bb", "타점", "득점"]
+PITCHER_TABLE_TOKENS = ["등판", "이닝", "투구수", "자책", "평균자책점", "승", "패", "세", "홀드", "세이브"]
 
 
 def _clean_events(events: List[str]) -> List[str]:
@@ -53,6 +87,30 @@ def _clean_events(events: List[str]) -> List[str]:
                 continue
             cleaned.append(ee)
     return cleaned
+
+
+def _normalize_header_text(value: Any) -> str:
+    # 공백/기호 제거 + 소문자화로 헤더 비교를 안정화
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    text = re.sub(r"<[^>]+>", "", value)
+    text = text.strip().lower()
+    text = re.sub(r"[()\[\]{}./]", " ", text)
+    text = re.sub(r"\s+", "", text)
+    return text
+
+
+def _flatten_columns(columns: Any) -> List[str]:
+    # MultiIndex 컬럼을 "상위 하위" 형태로 펼침
+    if pd is not None and isinstance(columns, pd.MultiIndex):
+        out: List[str] = []
+        for col in columns:
+            parts = [str(p) for p in col if p and str(p) != "nan"]
+            out.append(" ".join(parts).strip())
+        return out
+    return [str(c).strip() for c in list(columns)]
 
 
 def debug_hitter_shape(data: Dict[str, Any]) -> None:
@@ -186,7 +244,27 @@ def _has_any(event: str, tokens: List[str]) -> bool:
 def _is_single_hit(event: str) -> bool:
     if _has_any(event, EVENT_RULES["single_tokens"]):
         return True
+    if re.search(r"(?:[좌우중]|[1-9])안", event):
+        return True
     return any(rx.search(event) for rx in SINGLE_REGEXES)
+
+
+def _is_double_hit(event: str) -> bool:
+    if _has_any(event, EVENT_RULES["double"]):
+        return True
+    return bool(re.search(r"(?:[좌우중][좌우중]?2|2루타)", event))
+
+
+def _is_triple_hit(event: str) -> bool:
+    if _has_any(event, EVENT_RULES["triple"]):
+        return True
+    return bool(re.search(r"(?:[좌우중][좌우중]?3|3루타)", event))
+
+
+def _is_home_run_hit(event: str) -> bool:
+    if _has_any(event, EVENT_RULES["hr"]):
+        return True
+    return False
 
 
 def parse_events_to_stats(events: List[str]) -> Dict[str, int]:
@@ -223,20 +301,20 @@ def parse_events_to_stats(events: List[str]) -> Dict[str, int]:
             stats["SF"] += 1
 
         # Extra base hits
-        if _has_any(e, EVENT_RULES["double"]):
+        if _is_double_hit(e):
             stats["2B"] += 1
-        if _has_any(e, EVENT_RULES["triple"]):
+        if _is_triple_hit(e):
             stats["3B"] += 1
-        if _has_any(e, EVENT_RULES["hr"]):
+        if _is_home_run_hit(e):
             stats["HR"] += 1
 
         # Hit detection
         is_hit = False
-        if _has_any(e, EVENT_RULES["hr"]):
+        if _is_home_run_hit(e):
             is_hit = True
-        elif _has_any(e, EVENT_RULES["double"]):
+        elif _is_double_hit(e):
             is_hit = True
-        elif _has_any(e, EVENT_RULES["triple"]):
+        elif _is_triple_hit(e):
             is_hit = True
         elif _is_single_hit(e):
             is_hit = True
@@ -248,6 +326,535 @@ def parse_events_to_stats(events: List[str]) -> Dict[str, int]:
     stats["AB"] = max(0, stats["PA"] - stats["BB"] - stats["HBP"] - stats["SF"])
 
     return stats
+
+
+def _map_hitter_columns(headers: List[str]) -> Dict[str, Optional[str]]:
+    # 다양한 헤더 표기를 통일해 필요한 컬럼을 찾는다
+    normalized = {_normalize_header_text(h): h for h in headers}
+    mapped: Dict[str, Optional[str]] = {k: None for k in HITTER_COLUMN_ALIASES.keys()}
+    for key, aliases in HITTER_COLUMN_ALIASES.items():
+        for alias in aliases:
+            norm = _normalize_header_text(alias)
+            if norm in normalized:
+                mapped[key] = normalized[norm]
+                break
+            for header_norm, header_raw in normalized.items():
+                if norm and (norm in header_norm or header_norm in norm):
+                    mapped[key] = header_raw
+                    break
+            if mapped[key]:
+                break
+    return mapped
+
+
+def _is_hitter_table_headers(headers: List[str]) -> bool:
+    # 타자 테이블 판별: 핵심 스탯 컬럼 2개 이상
+    if not headers:
+        return False
+    header_norm = " ".join(_normalize_header_text(h) for h in headers)
+    hits = sum(1 for tok in HITTER_TABLE_TOKENS if tok in header_norm)
+    pitcher_hits = sum(1 for tok in PITCHER_TABLE_TOKENS if tok in header_norm)
+    return hits >= 2 and pitcher_hits == 0
+
+
+def _is_name_table_headers(headers: List[str]) -> bool:
+    if not headers:
+        return False
+    header_norm = " ".join(_normalize_header_text(h) for h in headers)
+    return "선수명" in header_norm or "선수" in header_norm or "player" in header_norm
+
+
+def _is_event_table_headers(headers: List[str]) -> bool:
+    # 이닝별 이벤트 테이블 판별: 1,2,3... 같은 숫자 헤더 비율이 높음
+    if not headers:
+        return False
+    inning_like = 0
+    total = 0
+    for h in headers:
+        text = str(h).strip()
+        if not text:
+            continue
+        total += 1
+        if re.fullmatch(r"\d{1,2}", text):
+            inning_like += 1
+    if total == 0:
+        return False
+    return total >= 7 and inning_like >= max(7, int(total * 0.7))
+
+
+def _normalize_team_label(value: str) -> str:
+    if not value:
+        return ""
+    text = value.strip()
+    text = re.sub(r"\s+", " ", text)
+    text = text.replace("타자 기록", "").strip()
+    return text
+
+
+def _normalize_team_name(team: str, away_team: str, home_team: str) -> str:
+    if not team:
+        return team
+    if away_team and away_team in team:
+        return away_team
+    if home_team and home_team in team:
+        return home_team
+    return team
+
+
+def _extract_player_name_from_row(row: List[Any]) -> str:
+    if not row:
+        return ""
+    # 보통 마지막 컬럼이 선수명
+    candidate = str(row[-1]).strip()
+    if candidate:
+        return candidate
+    # 한글 이름이 포함된 셀을 탐색
+    for cell in row:
+        cell_text = str(cell).strip()
+        if re.search(r"[가-힣]", cell_text):
+            return cell_text
+    return ""
+
+
+def _to_int_html(value: Any) -> int:
+    # '-', 공백 등은 0 처리
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if text in {"", "-", "—", "–"}:
+        return 0
+    text = re.sub(r"[,\s]", "", text)
+    if text.isdigit():
+        return int(text)
+    try:
+        return int(float(text))
+    except Exception:
+        return 0
+
+
+def _is_summary_player(name: str) -> bool:
+    # 합계/팀합계 행 제거
+    if not name:
+        return True
+    clean = _normalize_header_text(name)
+    return clean in {"합계", "팀합계", "team", "total"}
+
+
+def _extract_team_from_table(df) -> Optional[str]:
+    # pandas가 캡션을 제공하면 팀명 힌트로 사용
+    if df is None:
+        return None
+    try:
+        caption = getattr(df, "attrs", {}).get("caption")
+    except Exception:
+        caption = None
+    if isinstance(caption, str) and caption.strip():
+        return caption.strip()
+    return None
+
+
+def parse_hitter_rows_from_html(
+    html: str,
+    game_date: str,
+    game_id: str,
+    away_team: str,
+    home_team: str,
+    debug: bool = False,
+    text_fallback: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    def _read_html_tables(raw_html: str) -> List[Any]:
+        if pd is None:
+            return []
+        try:
+            return pd.read_html(raw_html)
+        except Exception:
+            return []
+
+    if pd is None:
+        if debug:
+            print("[debug] pandas not available; cannot parse HTML tables")
+        return parse_hitter_rows_from_text(
+            text=text_fallback or "",
+            game_date=game_date,
+            game_id=game_id,
+            away_team=away_team,
+            home_team=home_team,
+            debug=debug,
+        )
+
+    tables = _read_html_tables(html)
+    if not tables:
+        # HTML 전체 파싱 실패 시 table 조각 단위로 재시도
+        fragments = re.findall(r"<table[\s\S]*?</table>", html, re.IGNORECASE)
+        if debug:
+            print(f"[debug] pandas.read_html failed; fragments={len(fragments)}")
+        for frag in fragments:
+            tables.extend(_read_html_tables(frag))
+
+    if not tables:
+        if debug:
+            print("[debug] pandas.read_html failed")
+        return parse_hitter_rows_from_text(
+            text=text_fallback or "",
+            game_date=game_date,
+            game_id=game_id,
+            away_team=away_team,
+            home_team=home_team,
+            debug=debug,
+        )
+
+    candidates: List[Tuple[int, Any, List[str]]] = []
+    all_headers: List[Tuple[int, List[str]]] = []
+    for idx, df in enumerate(tables):
+        headers = _flatten_columns(df.columns)
+        all_headers.append((idx, headers))
+        if debug:
+            print(f"[debug] table#{idx} headers={headers}")
+        if _is_hitter_table_headers(headers):
+            candidates.append((idx, df, headers))
+
+    if not candidates:
+        if debug:
+            print("[debug] no hitter table candidates found")
+            for idx, headers in all_headers:
+                print(f"[debug] candidate_headers table#{idx}={headers}")
+        return []
+
+    rows: List[Dict[str, Any]] = []
+
+    team_defaults: List[Optional[str]] = []
+    if len(candidates) == 2:
+        team_defaults = [away_team, home_team]
+    else:
+        team_defaults = [None for _ in candidates]
+
+    for i, (idx, df, headers) in enumerate(candidates):
+        mapped = _map_hitter_columns(headers)
+        team_default = team_defaults[i] if i < len(team_defaults) else None
+        team_hint = _extract_team_from_table(df)
+
+        for _, row in df.iterrows():
+            row_dict = row.to_dict()
+            name_col = mapped.get("player_name")
+            player_name = row_dict.get(name_col) if name_col else None
+            player_name = str(player_name).strip() if player_name is not None else ""
+            if _is_summary_player(player_name):
+                continue
+
+            team_col = mapped.get("team")
+            team_val = row_dict.get(team_col) if team_col else None
+            team = str(team_val).strip() if team_val is not None else None
+            if not team:
+                team = team_hint or team_default
+
+            row_out = {
+                "game_date": game_date,
+                "game_id": game_id,
+                "team": team,
+                "player_name": player_name,
+                "AB": _to_int_html(row_dict.get(mapped.get("AB"))),
+                "H": _to_int_html(row_dict.get(mapped.get("H"))),
+                "HR": _to_int_html(row_dict.get(mapped.get("HR"))),
+                "BB": _to_int_html(row_dict.get(mapped.get("BB"))),
+                "SO": _to_int_html(row_dict.get(mapped.get("SO"))),
+            }
+            rows.append(row_out)
+
+    return rows
+
+
+def parse_hitter_rows_from_text(
+    text: str,
+    game_date: str,
+    game_id: str,
+    away_team: str,
+    home_team: str,
+    debug: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    테이블 태그가 없을 때를 대비한 텍스트 기반 파서.
+    - "OOO 타자 기록" 블록을 찾고
+    - 헤더에 AB/H/HR/BB/SO 중 2개 이상 포함된 라인 이후의 row를 파싱
+    - 선수명이 없는 행은 제외
+    """
+    if not text:
+        if debug:
+            print("[debug] text_fallback empty")
+        return []
+
+    norm = text.replace("\xa0", " ")
+    norm = re.sub(r"\r\n|\r", "\n", norm)
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in norm.split("\n")]
+    lines = [ln for ln in lines if ln]
+
+    team_blocks: List[Tuple[str, List[str]]] = []
+    current_team = None
+    current_lines: List[str] = []
+
+    team_pat = re.compile(r"(.+?)\s+타자\s*기록")
+    stop_tokens = ["투수 기록", "개인정보", "Copyright"]
+
+    for ln in lines:
+        if any(tok in ln for tok in stop_tokens):
+            if current_team and current_lines:
+                team_blocks.append((current_team, current_lines))
+            current_team = None
+            current_lines = []
+            continue
+
+        m = team_pat.search(ln)
+        if m:
+            if current_team and current_lines:
+                team_blocks.append((current_team, current_lines))
+            current_team = m.group(1).strip()
+            current_lines = []
+            continue
+
+        if current_team:
+            current_lines.append(ln)
+
+    if current_team and current_lines:
+        team_blocks.append((current_team, current_lines))
+
+    if debug:
+        print(f"[debug] text team_blocks={len(team_blocks)}")
+
+    rows: List[Dict[str, Any]] = []
+    for team_name, block in team_blocks:
+        header_idx = -1
+        header_cols: List[str] = []
+        for i, ln in enumerate(block):
+            header_cols = ln.split(" ")
+            if _is_hitter_table_headers(header_cols):
+                header_idx = i
+                break
+
+        if header_idx == -1:
+            if debug:
+                print(f"[debug] no hitter header in team block={team_name}")
+            continue
+
+        mapped = _map_hitter_columns(header_cols)
+
+        for ln in block[header_idx + 1:]:
+            if ln.upper() == "TOTAL":
+                break
+            if "타자 기록" in ln or "투수 기록" in ln:
+                break
+            parts = ln.split(" ")
+            if len(parts) < 2:
+                continue
+
+            row_dict = {header_cols[i]: parts[i] if i < len(parts) else "" for i in range(len(header_cols))}
+            name_col = mapped.get("player_name")
+            player_name = row_dict.get(name_col) if name_col else None
+            player_name = str(player_name).strip() if player_name is not None else ""
+            if _is_summary_player(player_name):
+                continue
+
+            row_out = {
+                "game_date": game_date,
+                "game_id": game_id,
+                "team": team_name or away_team or home_team,
+                "player_name": player_name,
+                "AB": _to_int_html(row_dict.get(mapped.get("AB"))),
+                "H": _to_int_html(row_dict.get(mapped.get("H"))),
+                "HR": _to_int_html(row_dict.get(mapped.get("HR"))),
+                "BB": _to_int_html(row_dict.get(mapped.get("BB"))),
+                "SO": _to_int_html(row_dict.get(mapped.get("SO"))),
+            }
+            rows.append(row_out)
+
+    return rows
+
+
+def parse_hitter_rows_from_dom_tables(
+    tables: List[Dict[str, Any]],
+    game_date: str,
+    game_id: str,
+    away_team: str,
+    home_team: str,
+    debug: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Selenium JS로 추출한 DOM 테이블 배열을 직접 파싱한다.
+    tables item 예시:
+    {
+      "index": 3,
+      "team": "삼성 라이온즈",
+      "headers": ["타수", "안타", ...],
+      "rows": [["김지찬", "4", "1", ...], ...],
+      "text": "..."
+    }
+    """
+    if not tables:
+        if debug:
+            print("[debug] dom tables empty")
+        return []
+
+    # 1) 테이블 메타 정리
+    metas: List[Dict[str, Any]] = []
+    for t in tables:
+        headers = t.get("headers") or []
+        rows = t.get("rows") or []
+        if debug:
+            print(
+                f"[debug] dom table#{t.get('index')} headers_len={len(headers)} rows_len={len(rows)} "
+                f"headers={headers[:10]}"
+            )
+        metas.append(
+            {
+                "index": t.get("index"),
+                "team": _normalize_team_label(t.get("team") or ""),
+                "headers": headers,
+                "rows": rows,
+            }
+        )
+
+    # 2) 이름 테이블 + 스탯 테이블 매칭
+    name_tables = [m for m in metas if _is_name_table_headers(m["headers"])]
+    name_tables = sorted(name_tables, key=lambda x: int(x["index"]))
+    stat_tables = [m for m in metas if _is_hitter_table_headers(m["headers"])]
+    stat_tables = sorted(stat_tables, key=lambda x: int(x["index"]))
+    event_tables = [m for m in metas if _is_event_table_headers(m["headers"])]
+    event_tables = sorted(event_tables, key=lambda x: int(x["index"]))
+
+    # 이름 테이블 기준으로 팀 순서 보정
+    if len(name_tables) == 2:
+        for i, nt in enumerate(name_tables):
+            inferred = away_team if i == 0 else home_team
+            if not nt.get("team") or nt.get("team") not in {away_team, home_team}:
+                nt["team"] = inferred
+
+    rows_out: List[Dict[str, Any]] = []
+    for stat_idx, stat in enumerate(stat_tables):
+        # 가까운 이름 테이블 찾기 (행 수가 유사하고 인접한 테이블)
+        candidates = []
+        for name in name_tables:
+            stat_idx_val = int(stat["index"])
+            name_idx_val = int(name["index"])
+            if name_idx_val >= stat_idx_val:
+                continue
+            idx_gap = stat_idx_val - name_idx_val
+            row_gap = abs(len(stat["rows"]) - len(name["rows"]))
+            if idx_gap <= 3 and row_gap <= 1:
+                candidates.append((row_gap, idx_gap, name))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda x: (x[0], x[1]))
+        name_tbl = candidates[0][2]
+
+        team = name_tbl.get("team") or stat.get("team") or ""
+        team = _normalize_team_name(team, away_team, home_team)
+        if not team:
+            team = away_team if len(rows_out) == 0 else home_team
+
+        headers = stat["headers"]
+        mapped = _map_hitter_columns(headers)
+        event_tbl = None
+        name_idx = int(name_tbl["index"])
+        stat_idx_val = int(stat["index"])
+        event_candidates = []
+        for evt in event_tables:
+            evt_idx = int(evt["index"])
+            if evt_idx <= name_idx:
+                continue
+            idx_gap = abs(stat_idx_val - evt_idx)
+            row_gap = abs(len(evt["rows"]) - len(name_tbl["rows"]))
+            if row_gap <= 1 and idx_gap <= 3:
+                event_candidates.append((idx_gap, row_gap, evt))
+        if event_candidates:
+            event_candidates.sort(key=lambda x: (x[0], x[1]))
+            event_tbl = event_candidates[0][2]
+
+        for r_idx, row in enumerate(stat["rows"]):
+            if not isinstance(row, list) or not row:
+                continue
+            if row[0] and str(row[0]).strip().upper() == "TOTAL":
+                break
+
+            name_row = name_tbl["rows"][r_idx] if r_idx < len(name_tbl["rows"]) else []
+            player_name = _extract_player_name_from_row(name_row)
+            if _is_summary_player(player_name):
+                continue
+
+            row_dict = {headers[i]: row[i] if i < len(headers) else "" for i in range(len(headers))}
+            stats_raw = {
+                "AB": _to_int_html(row_dict.get(mapped.get("AB"))),
+                "H": _to_int_html(row_dict.get(mapped.get("H"))),
+                "2B": _to_int_html(row_dict.get(mapped.get("2B"))),
+                "3B": _to_int_html(row_dict.get(mapped.get("3B"))),
+                "HR": _to_int_html(row_dict.get(mapped.get("HR"))),
+                "BB": _to_int_html(row_dict.get(mapped.get("BB"))),
+                "HBP": _to_int_html(row_dict.get(mapped.get("HBP"))),
+                "SF": _to_int_html(row_dict.get(mapped.get("SF"))),
+                "R": _to_int_html(row_dict.get(mapped.get("R"))),
+                "RBI": _to_int_html(row_dict.get(mapped.get("RBI"))),
+                "TB": _to_int_html(row_dict.get(mapped.get("TB"))),
+                "PA": _to_int_html(row_dict.get(mapped.get("PA"))),
+                "SB": _to_int_html(row_dict.get(mapped.get("SB"))),
+                "CS": _to_int_html(row_dict.get(mapped.get("CS"))),
+                "GDP": _to_int_html(row_dict.get(mapped.get("GDP"))),
+                "SO": _to_int_html(row_dict.get(mapped.get("SO"))),
+            }
+            event_stats = {
+                "PA": 0,
+                "AB": 0,
+                "H": 0,
+                "2B": 0,
+                "3B": 0,
+                "HR": 0,
+                "BB": 0,
+                "HBP": 0,
+                "SF": 0,
+                "SO": 0,
+                "TB": 0,
+            }
+            if event_tbl and r_idx < len(event_tbl["rows"]):
+                evt_row = event_tbl["rows"][r_idx]
+                if isinstance(evt_row, list):
+                    events = [str(v).strip() for v in evt_row if str(v).strip()]
+                    event_stats = parse_events_to_stats(events)
+
+            # 상세 스탯은 이벤트 기반으로 보강 (기본 스탯 테이블은 AB/H/RBI/R 위주인 경우가 많음)
+            for key in ("2B", "3B", "HR", "BB", "HBP", "SF", "SO"):
+                if stats_raw.get(key, 0) == 0 and event_stats.get(key, 0) > 0:
+                    stats_raw[key] = int(event_stats[key])
+            if stats_raw["PA"] == 0 and event_stats.get("PA", 0) > 0:
+                stats_raw["PA"] = int(event_stats["PA"])
+            # H는 기본 스탯 테이블 우선, 없으면 이벤트 기반
+            if stats_raw["H"] == 0 and event_stats.get("H", 0) > 0:
+                stats_raw["H"] = int(event_stats["H"])
+            if stats_raw["TB"] == 0:
+                stats_raw["TB"] = _calc_tb(stats_raw)
+            rows_out.append(
+                {
+                    "game_date": game_date,
+                    "game_id": game_id,
+                    "team": team,
+                    "player_name": player_name,
+                    "AB": stats_raw["AB"],
+                    "H": stats_raw["H"],
+                    "2B": stats_raw["2B"],
+                    "3B": stats_raw["3B"],
+                    "HR": stats_raw["HR"],
+                    "BB": stats_raw["BB"],
+                    "HBP": stats_raw["HBP"],
+                    "SF": stats_raw["SF"],
+                    "R": stats_raw["R"],
+                    "RBI": stats_raw["RBI"],
+                    "TB": stats_raw["TB"],
+                    "PA": stats_raw["PA"],
+                    "SB": stats_raw["SB"],
+                    "CS": stats_raw["CS"],
+                    "GDP": stats_raw["GDP"],
+                    "SO": stats_raw["SO"],
+                }
+            )
+
+    return rows_out
 
 
 def parse_hitter_rows(
@@ -512,6 +1119,33 @@ def _to_int(value: Any) -> int:
         except Exception:
             return 0
     return 0
+
+
+def _calc_tb(stats: Dict[str, int]) -> int:
+    if stats.get("TB", 0) > 0:
+        return stats["TB"]
+    h = stats.get("H", 0)
+    d2 = stats.get("2B", 0)
+    d3 = stats.get("3B", 0)
+    hr = stats.get("HR", 0)
+    single = max(0, h - d2 - d3 - hr)
+    return single + 2 * d2 + 3 * d3 + 4 * hr
+
+
+def calc_ops(stats: Dict[str, int]) -> float:
+    # OBP = (H + BB + HBP) / (AB + BB + HBP + SF)
+    # SLG = TB / AB
+    ab = stats.get("AB", 0)
+    h = stats.get("H", 0)
+    bb = stats.get("BB", 0)
+    hbp = stats.get("HBP", 0)
+    sf = stats.get("SF", 0)
+    tb = _calc_tb(stats)
+
+    obp_den = ab + bb + hbp + sf
+    obp = (h + bb + hbp) / obp_den if obp_den > 0 else 0.0
+    slg = tb / ab if ab > 0 else 0.0
+    return round(obp + slg, 4)
 
 
 def _extract_events_from_row(row: Dict[str, Any]) -> List[str]:
