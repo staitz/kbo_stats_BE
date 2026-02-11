@@ -89,11 +89,21 @@ def _debug_table_dump(name: str, raw_value: Any) -> None:
     if not isinstance(parsed, dict):
         return
     headers = parsed.get("headers") or parsed.get("header") or []
-    if isinstance(headers, list) and headers:
-        print(f"[debug] {name} headers sample={headers[:1]}")
+    if isinstance(headers, list):
+        print(f"[debug] {name} headers full={headers}")
     rows = parsed.get("rows") or parsed.get("row") or []
-    if isinstance(rows, list) and rows:
-        print(f"[debug] {name} rows[0] sample={rows[0]}")
+    if isinstance(rows, list):
+        print(f"[debug] {name} rows len={len(rows)}")
+        if rows:
+            row0 = rows[0]
+            row0_type = type(row0)
+            row0_shape = "dict.row" if isinstance(row0, dict) and "row" in row0 else "list"
+            try:
+                row0_dump = json.dumps(row0, ensure_ascii=False)
+            except Exception:
+                row0_dump = str(row0)
+            print(f"[debug] {name} rows[0] type={row0_type} shape={row0_shape}")
+            print(f"[debug] {name} rows[0] dump={row0_dump[:500]}")
 
 
 def _fetch_form_endpoint(driver, url: str, payload: Dict[str, str]) -> Tuple[Optional[int], str]:
