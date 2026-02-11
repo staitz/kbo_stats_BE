@@ -1,11 +1,20 @@
 import argparse
+import datetime as dt
 import sqlite3
 import time
 from typing import Any, Dict, Iterable, List, Tuple
+from zoneinfo import ZoneInfo
 
 from kbo_api import _make_driver, _wait_ready, fetch_day_schedule
 from kbo_db import DB_PATH, init_db, insert_rows, migrate_columns
 from kbo_hitter_parser import parse_hitter_rows_from_dom_tables
+
+
+KST = ZoneInfo("Asia/Seoul")
+
+
+def _today_yyyymmdd_kst() -> str:
+    return dt.datetime.now(KST).strftime("%Y%m%d")
 
 
 def _extract_dom_tables(driver) -> List[Dict[str, Any]]:
@@ -91,23 +100,16 @@ def _fetch_rows_for_game(
     return []
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Daily KBO hitter log collector")
-    parser.add_argument("date", help="YYYYMMDD")
-    parser.add_argument("--upsert", action="store_true", help="update existing rows on conflict")
-    args = parser.parse_args()
-
-    game_date = args.date
-    games = fetch_day_schedule(game_date, debug=False)
-    game_ids = [
-        (g.get("game_id"), g.get("away_team"), g.get("home_team"))
-        for g in games
-        if g.get("game_id")
-    ]
-
-    if not game_ids:
-        print("[warn] no games found for date:", game_date)
-        return
+def collect_for_dates(dates: List[str], upsert: bool = False) -> Dict[str, int]:
+    if not dates:
+        return {
+            "dates": 0,
+            "games": 0,
+            "rows": 0,
+            "inserted": 0,
+            "ignored": 0,
+            "skipped_days": 0,
+        }
 
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
@@ -115,24 +117,81 @@ def main() -> None:
 
     driver = _make_driver(headless=True)
     try:
-        inserted_total = 0
-        for game_id, away_team, home_team in game_ids:
-            rows = _fetch_rows_for_game(
-                driver=driver,
-                game_date=game_date,
-                game_id=game_id,
-                away_team=away_team or "",
-                home_team=home_team or "",
-            )
-            inserted = insert_rows(conn, rows, upsert=args.upsert)
-            inserted_total += inserted
+        total_games = 0
+        total_rows = 0
+        total_inserted = 0
+        total_ignored = 0
+        skipped_days = 0
+
+        for game_date in dates:
+            games = fetch_day_schedule(game_date, debug=False)
+            game_ids: List[Tuple[str, str, str]] = [
+                (g.get("game_id"), g.get("away_team"), g.get("home_team"))
+                for g in games
+                if g.get("game_id")
+            ]
+
+            if not game_ids:
+                skipped_days += 1
+                print(f"[skip] date={game_date} no games")
+                continue
+
+            date_rows = 0
+            date_inserted = 0
+            date_games = len(game_ids)
+
+            for game_id, away_team, home_team in game_ids:
+                rows = _fetch_rows_for_game(
+                    driver=driver,
+                    game_date=game_date,
+                    game_id=game_id,
+                    away_team=away_team or "",
+                    home_team=home_team or "",
+                )
+                inserted = insert_rows(conn, rows, upsert=upsert)
+                date_rows += len(rows)
+                date_inserted += inserted
+                print(
+                    f"[ok] date={game_date} game_id={game_id} rows={len(rows)} inserted={inserted}"
+                )
+
+            date_ignored = max(0, date_rows - date_inserted)
+            total_games += date_games
+            total_rows += date_rows
+            total_inserted += date_inserted
+            total_ignored += date_ignored
             print(
-                f"[ok] game_id={game_id} rows={len(rows)} inserted={inserted}"
+                f"[day] date={game_date} games={date_games} rows={date_rows} "
+                f"inserted={date_inserted} ignored={date_ignored}"
             )
-        print(f"[done] inserted_total={inserted_total}")
+
+        summary = {
+            "dates": len(dates),
+            "games": total_games,
+            "rows": total_rows,
+            "inserted": total_inserted,
+            "ignored": total_ignored,
+            "skipped_days": skipped_days,
+        }
+        print(
+            f"[done] dates={summary['dates']} games={summary['games']} rows={summary['rows']} "
+            f"inserted={summary['inserted']} ignored={summary['ignored']} skipped_days={summary['skipped_days']}"
+        )
+        return summary
     finally:
         driver.quit()
         conn.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Daily KBO hitter log collector")
+    parser.add_argument("date", nargs="?", help="YYYYMMDD (default: today in KST)")
+    parser.add_argument("--upsert", action="store_true", help="update existing rows on conflict")
+    args = parser.parse_args()
+
+    game_date = args.date or _today_yyyymmdd_kst()
+    print(f"[run] date={game_date} upsert={bool(args.upsert)}")
+    collect_for_dates(dates=[game_date], upsert=args.upsert)
 
 
 if __name__ == "__main__":
