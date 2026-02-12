@@ -6,6 +6,7 @@ DB_PATH = "kbo_stats.db"
 
 
 REQUIRED_COLUMNS = {
+    "SH": "INTEGER NOT NULL DEFAULT 0",
     "2B": "INTEGER NOT NULL DEFAULT 0",
     "3B": "INTEGER NOT NULL DEFAULT 0",
     "HBP": "INTEGER NOT NULL DEFAULT 0",
@@ -66,6 +67,7 @@ def _row_to_values(row: Dict[str, Any]) -> Tuple[Any, ...]:
         int(row.get("HR", 0)),
         int(row.get("BB", 0)),
         int(row.get("SO", 0)),
+        int(row.get("SH", 0)),
         int(row.get("2B", 0)),
         int(row.get("3B", 0)),
         int(row.get("HBP", 0)),
@@ -92,14 +94,14 @@ def insert_rows(
     cursor = conn.cursor()
     if not upsert:
         cursor.executemany(
-            """
-            INSERT OR IGNORE INTO hitter_game_logs
-            (game_date, game_id, team, player_name, AB, H, HR, BB, SO, "2B", "3B",
-             HBP, SF, R, RBI, TB, PA, SB, CS, GDP)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            values,
-        )
+        """
+        INSERT OR IGNORE INTO hitter_game_logs
+        (game_date, game_id, team, player_name, AB, H, HR, BB, SO, SH, "2B", "3B",
+         HBP, SF, R, RBI, TB, PA, SB, CS, GDP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        values,
+    )
         conn.commit()
         return cursor.rowcount
 
@@ -107,15 +109,16 @@ def insert_rows(
     cursor.executemany(
         """
         INSERT INTO hitter_game_logs
-        (game_date, game_id, team, player_name, AB, H, HR, BB, SO, "2B", "3B",
+        (game_date, game_id, team, player_name, AB, H, HR, BB, SO, SH, "2B", "3B",
          HBP, SF, R, RBI, TB, PA, SB, CS, GDP)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(game_id, team, player_name) DO UPDATE SET
             AB=excluded.AB,
             H=excluded.H,
             HR=excluded.HR,
             BB=excluded.BB,
             SO=excluded.SO,
+            SH=excluded.SH,
             "2B"=excluded."2B",
             "3B"=excluded."3B",
             HBP=excluded.HBP,
