@@ -8,12 +8,13 @@ Rules summary (extend as needed):
 - BB: contains "4구"
 - SO: contains "삼진"
 - HBP: contains "사구"
+- SH: contains "희번" or "희생번트"
 - SF: contains "희비" or "희플"
 - 2B: contains "우2"/"좌2"/"중2" or "2루타"
 - 3B: contains "우3"/"좌3"/"중3" or "3루타"
 - HR: contains "홈런"
 - H: includes HR/2B/3B plus single hits ("안타", "1안", etc.)
-- AB: AB = PA - BB - HBP - SF (minimum version)
+- AB: AB = PA - BB - HBP - SF - SH (minimum version)
 """
 
 import json
@@ -32,6 +33,7 @@ EVENT_RULES = {
     "so": ["삼진"],
     "hbp": ["사구"],
     "sf": ["희비", "희플"],
+    "sh": ["희번", "희생번트", "희타"],
     "double": ["우2", "좌2", "중2", "2루타"],
     "triple": ["우3", "좌3", "중3", "3루타"],
     "hr": ["홈런", "홈"],
@@ -60,6 +62,7 @@ HITTER_COLUMN_ALIASES = {
     "HR": ["홈런", "hr"],
     "BB": ["볼넷", "bb", "4구"],
     "HBP": ["사구", "hbp"],
+    "SH": ["희번", "희생번트", "sh"],
     "SF": ["희비", "희플", "희생플라이", "sf"],
     "R": ["득점", "r", "run"],
     "RBI": ["타점", "rbi"],
@@ -280,6 +283,7 @@ def parse_events_to_stats(events: List[str]) -> Dict[str, int]:
         "BB": 0,
         "HBP": 0,
         "SO": 0,
+        "SH": 0,
         "SF": 0,
     }
 
@@ -295,6 +299,10 @@ def parse_events_to_stats(events: List[str]) -> Dict[str, int]:
         # HBP
         if _has_any(e, EVENT_RULES["hbp"]):
             stats["HBP"] += 1
+
+        # SH
+        if _has_any(e, EVENT_RULES["sh"]):
+            stats["SH"] += 1
 
         # SF
         if _has_any(e, EVENT_RULES["sf"]):
@@ -323,7 +331,9 @@ def parse_events_to_stats(events: List[str]) -> Dict[str, int]:
             stats["H"] += 1
 
     # AB heuristic: exclude BB/HBP/SF
-    stats["AB"] = max(0, stats["PA"] - stats["BB"] - stats["HBP"] - stats["SF"])
+    stats["AB"] = max(
+        0, stats["PA"] - stats["BB"] - stats["HBP"] - stats["SF"] - stats["SH"]
+    )
 
     return stats
 
@@ -789,6 +799,7 @@ def parse_hitter_rows_from_dom_tables(
                 "HR": _to_int_html(row_dict.get(mapped.get("HR"))),
                 "BB": _to_int_html(row_dict.get(mapped.get("BB"))),
                 "HBP": _to_int_html(row_dict.get(mapped.get("HBP"))),
+                "SH": _to_int_html(row_dict.get(mapped.get("SH"))),
                 "SF": _to_int_html(row_dict.get(mapped.get("SF"))),
                 "R": _to_int_html(row_dict.get(mapped.get("R"))),
                 "RBI": _to_int_html(row_dict.get(mapped.get("RBI"))),
@@ -808,6 +819,7 @@ def parse_hitter_rows_from_dom_tables(
                 "HR": 0,
                 "BB": 0,
                 "HBP": 0,
+                "SH": 0,
                 "SF": 0,
                 "SO": 0,
                 "TB": 0,
@@ -819,7 +831,7 @@ def parse_hitter_rows_from_dom_tables(
                     event_stats = parse_events_to_stats(events)
 
             # 상세 스탯은 이벤트 기반으로 보강 (기본 스탯 테이블은 AB/H/RBI/R 위주인 경우가 많음)
-            for key in ("2B", "3B", "HR", "BB", "HBP", "SF", "SO"):
+            for key in ("2B", "3B", "HR", "BB", "HBP", "SH", "SF", "SO"):
                 if stats_raw.get(key, 0) == 0 and event_stats.get(key, 0) > 0:
                     stats_raw[key] = int(event_stats[key])
             if stats_raw["PA"] == 0 and event_stats.get("PA", 0) > 0:
@@ -829,6 +841,14 @@ def parse_hitter_rows_from_dom_tables(
                 stats_raw["H"] = int(event_stats["H"])
             if stats_raw["TB"] == 0:
                 stats_raw["TB"] = _calc_tb(stats_raw)
+            if stats_raw["PA"] == 0:
+                stats_raw["PA"] = (
+                    stats_raw["AB"]
+                    + stats_raw["BB"]
+                    + stats_raw["HBP"]
+                    + stats_raw["SF"]
+                    + stats_raw.get("SH", 0)
+                )
             rows_out.append(
                 {
                     "game_date": game_date,
@@ -842,6 +862,7 @@ def parse_hitter_rows_from_dom_tables(
                     "HR": stats_raw["HR"],
                     "BB": stats_raw["BB"],
                     "HBP": stats_raw["HBP"],
+                    "SH": stats_raw["SH"],
                     "SF": stats_raw["SF"],
                     "R": stats_raw["R"],
                     "RBI": stats_raw["RBI"],
@@ -1235,6 +1256,7 @@ def _parse_stats_table(table: Any) -> List[Dict[str, Any]]:
         "BB": ["볼넷", "bb", "4구"],
         "HBP": ["사구", "hbp"],
         "SO": ["삼진", "so"],
+        "SH": ["희번", "희생번트", "sh"],
         "SF": ["희비", "희플", "sf"],
     }
     for row in rows:
@@ -1318,12 +1340,22 @@ def _parse_hitter_rows_from_table_bundle(
             "BB": 0,
             "HBP": 0,
             "SO": 0,
+            "SH": 0,
             "SF": 0,
         }
         events = stats_entry.get("events") or []
         if events and not any(stats.values()):
             derived = parse_events_to_stats(events)
             stats = derived
+
+        if stats.get("PA", 0) == 0:
+            stats["PA"] = (
+                stats.get("AB", 0)
+                + stats.get("BB", 0)
+                + stats.get("HBP", 0)
+                + stats.get("SF", 0)
+                + stats.get("SH", 0)
+            )
 
         team = item.get("team") or stats_entry.get("team") or default_team
 
@@ -1351,6 +1383,7 @@ def _parse_hitter_rows_from_table_bundle(
                 "BB": stats.get("BB", 0),
                 "HBP": stats.get("HBP", 0),
                 "SO": stats.get("SO", 0),
+                "SH": stats.get("SH", 0),
                 "SF": stats.get("SF", 0),
                 "events": events,
                 "team_status": status,
