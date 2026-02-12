@@ -779,3 +779,26 @@ def fetch_day_schedule(
         enrich_today_only=enrich_today_only
     )
 
+
+def find_season_start_date(season_id: str, debug: bool = False) -> Optional[str]:
+    candidates: List[str] = []
+    skip_terms = {"시범", "연습", "퓨처스"}
+    for month in range(1, 13):
+        games = fetch_month_schedule(
+            season_id=str(season_id),
+            game_month=str(month).zfill(2),
+            debug=debug
+        )
+        for g in games:
+            date_val = g.get("date")
+            status = (g.get("status") or "").strip()
+            if status and any(term in status for term in skip_terms):
+                continue
+            if not g.get("game_id"):
+                continue
+            if isinstance(date_val, str) and len(date_val) == 8 and date_val.startswith(str(season_id)):
+                candidates.append(date_val)
+    if not candidates:
+        return None
+    return min(candidates)
+
