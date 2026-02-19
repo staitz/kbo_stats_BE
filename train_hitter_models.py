@@ -107,6 +107,7 @@ def main() -> None:
     parser.add_argument("--model-dir", default="models")
     parser.add_argument("--val-after")
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--blend-k", type=float, default=60.0)
     args = parser.parse_args()
 
     if args.train_season is None:
@@ -124,7 +125,14 @@ def main() -> None:
 
     cols = table_columns(conn, "hitter_training_rows")
     key_cols = {"train_season", "as_of_date", "team", "player_name"}
-    target_cols = {"y_hr_final", "y_ops_final"}
+    target_mode = "final_direct"
+    hr_target_col = "y_hr_final"
+    ops_target_col = "y_ops_final"
+    if "y_hr_ros" in cols and "y_ops_ros" in cols:
+        target_mode = "ros_to_final"
+        hr_target_col = "y_hr_ros"
+        ops_target_col = "y_ops_ros"
+    target_cols = {"y_hr_final", "y_ops_final", "y_hr_ros", "y_ops_ros"}
     feature_cols = []
     skipped = []
     for col, col_type in cols.items():
@@ -141,13 +149,14 @@ def main() -> None:
 
     feature_sql = ", ".join(safe_col(c) for c in feature_cols)
     sql = f"""
-        SELECT as_of_date, {feature_sql}, y_hr_final, y_ops_final
+        SELECT as_of_date, {feature_sql}, {safe_col(hr_target_col)}, {safe_col(ops_target_col)}
         FROM hitter_training_rows
         WHERE train_season = ?
     """
     rows = conn.execute(sql, (args.train_season,)).fetchall()
     if not rows:
         raise SystemExit("No training rows found.")
+    print(f"Target mode: {target_mode} ({hr_target_col}, {ops_target_col})")
 
     train_rows, val_rows = split_by_date(rows, args.val_after)
     print(
@@ -191,6 +200,10 @@ def main() -> None:
         "train_season": args.train_season,
         "model_type": model_name,
         "feature_columns": feature_cols,
+        "target_mode": target_mode,
+        "hr_target_col": hr_target_col,
+        "ops_target_col": ops_target_col,
+        "recommended_blend_k": float(args.blend_k),
         "created_at": datetime.utcnow().isoformat() + "Z",
         "version": "v1",
     }
