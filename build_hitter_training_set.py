@@ -1,6 +1,6 @@
 import argparse
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Tuple
 
@@ -37,10 +37,17 @@ def ensure_training_table(
             player_name TEXT NOT NULL,
             y_hr_final INTEGER NOT NULL DEFAULT 0,
             y_ops_final REAL NOT NULL DEFAULT 0,
+            y_hr_ros REAL NOT NULL DEFAULT 0,
+            y_ops_ros REAL NOT NULL DEFAULT 0,
             UNIQUE (train_season, as_of_date, team, player_name)
         )
         """
     )
+    existing = table_columns(conn, "hitter_training_rows")
+    if "y_hr_ros" not in existing:
+        conn.execute("ALTER TABLE hitter_training_rows ADD COLUMN y_hr_ros REAL NOT NULL DEFAULT 0")
+    if "y_ops_ros" not in existing:
+        conn.execute("ALTER TABLE hitter_training_rows ADD COLUMN y_ops_ros REAL NOT NULL DEFAULT 0")
     existing = table_columns(conn, "hitter_training_rows")
     for col_name, col_type in feature_cols:
         if col_name in existing:
@@ -133,6 +140,15 @@ def main() -> None:
     if "HR" not in total_cols or "OPS" not in total_cols:
         raise SystemExit("Missing HR or OPS in hitter_season_totals")
 
+    prior_feature_cols: List[Tuple[str, str]] = [
+        ("prev_season_pa", "INTEGER"),
+        ("prev_season_hr", "INTEGER"),
+        ("prev_season_ops", "REAL"),
+    ]
+    for col_name, col_type in prior_feature_cols:
+        if col_name not in {c for c, _ in feature_cols}:
+            feature_cols.append((col_name, col_type))
+
     ensure_training_table(conn, feature_cols)
 
     filters = ["season = ?"]
@@ -160,14 +176,22 @@ def main() -> None:
         print("No sample dates found.")
         return
 
-    pa_filter = ""
-    if "PA_to_date" in snapshot_cols:
-        pa_filter = "AND s.PA_to_date >= 30"
-    else:
-        print("PA_to_date missing in snapshots; sampling without PA filter.")
+    pa_col = "PA_to_date" if "PA_to_date" in snapshot_cols else ("PA" if "PA" in snapshot_cols else "")
+    pa_filter = f"AND s.{safe_col(pa_col)} >= 30" if pa_col else ""
+    if not pa_col:
+        print("PA/PA_to_date missing in snapshots; sampling without PA filter.")
 
     date_placeholders = ", ".join(["?"] * len(sample_dates))
-    feature_select = ", ".join(f"s.{safe_col(c)} AS {safe_col(c)}" for c, _ in feature_cols)
+    snapshot_feature_cols = [c for c, _ in feature_cols if c not in {"prev_season_pa", "prev_season_hr", "prev_season_ops"}]
+    feature_select_snapshot = ", ".join(f"s.{safe_col(c)} AS {safe_col(c)}" for c in snapshot_feature_cols)
+    feature_select_prior = ", ".join(
+        [
+            "COALESCE(p.PA, 0) AS prev_season_pa",
+            "COALESCE(p.HR, 0) AS prev_season_hr",
+            "COALESCE(p.OPS, 0.0) AS prev_season_ops",
+        ]
+    )
+    feature_select = ", ".join([feature_select_snapshot, feature_select_prior]).strip(", ")
     sql = f"""
         SELECT
             ? AS train_season,
@@ -176,17 +200,23 @@ def main() -> None:
             s.player_name,
             {feature_select},
             t.HR AS y_hr_final,
-            t.OPS AS y_ops_final
+            t.OPS AS y_ops_final,
+            (t.HR - COALESCE(s.HR, 0)) AS y_hr_ros,
+            (t.OPS - COALESCE(s.OPS, 0.0)) AS y_ops_ros
         FROM hitter_daily_snapshots s
         JOIN hitter_season_totals t
             ON t.season = ?
             AND s.team = t.team
             AND s.player_name = t.player_name
+        LEFT JOIN hitter_season_totals p
+            ON p.season = (? - 1)
+            AND s.team = p.team
+            AND s.player_name = p.player_name
         WHERE s.season = ?
             AND s.as_of_date IN ({date_placeholders})
             {pa_filter}
     """
-    select_params: List = [args.train_season, args.train_season, args.train_season]
+    select_params: List = [args.train_season, args.train_season, args.train_season, args.train_season]
     select_params.extend(sample_dates)
 
     rows = conn.execute(sql, select_params).fetchall()
@@ -197,7 +227,7 @@ def main() -> None:
     insert_cols = (
         ["train_season", "as_of_date", "team", "player_name"]
         + [c for c, _ in feature_cols]
-        + ["y_hr_final", "y_ops_final"]
+        + ["y_hr_final", "y_ops_final", "y_hr_ros", "y_ops_ros"]
     )
     insert_cols_sql = ", ".join(safe_col(c) for c in insert_cols)
     placeholders = ", ".join(["?"] * len(insert_cols))
@@ -233,7 +263,9 @@ def main() -> None:
         """
         SELECT COUNT(*) AS cnt,
                AVG(y_hr_final) AS avg_hr,
-               AVG(y_ops_final) AS avg_ops
+               AVG(y_ops_final) AS avg_ops,
+               AVG(y_hr_ros) AS avg_hr_ros,
+               AVG(y_ops_ros) AS avg_ops_ros
         FROM hitter_training_rows
         WHERE train_season = ?
         """,
@@ -242,7 +274,8 @@ def main() -> None:
     if summary:
         print(
             f"Target summary: rows={summary['cnt']} avg_hr={summary['avg_hr']:.3f} "
-            f"avg_ops={summary['avg_ops']:.4f}"
+            f"avg_ops={summary['avg_ops']:.4f} avg_hr_ros={summary['avg_hr_ros']:.3f} "
+            f"avg_ops_ros={summary['avg_ops_ros']:.4f}"
         )
 
     conn.close()
