@@ -3,9 +3,9 @@ import datetime as dt
 import sqlite3
 from zoneinfo import ZoneInfo
 
-from kbo_db import DB_PATH, init_db, migrate_columns
-from run_range_hitter import _iter_dates
-from run_daily_hitter import collect_for_dates
+from collector.kbo_db import DB_PATH, init_db, migrate_columns
+from collector.run_range_hitter import _iter_dates
+from collector.run_daily_hitter import collect_for_dates
 
 
 KST = ZoneInfo("Asia/Seoul")

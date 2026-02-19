@@ -3,8 +3,8 @@ import datetime as dt
 from typing import List
 from zoneinfo import ZoneInfo
 
-from kbo_api import find_season_start_date
-from run_daily_hitter import collect_for_dates
+from collector.kbo_api import find_season_start_date
+from collector.run_daily_hitter import collect_for_dates
 
 
 def _iter_dates(start_yyyymmdd: str, end_yyyymmdd: str) -> List[str]:

@@ -2,8 +2,8 @@
 Build hitter daily snapshot features from hitter_game_logs.
 
 Examples:
-  python build_hitter_snapshots.py --season 2025 --start 20250601 --end 20250630 --upsert
-  python build_hitter_snapshots.py --season 2025 --as-of 20250610 --upsert --preview 5
+  python -m prediction.build_hitter_snapshots --season 2025 --start 20250601 --end 20250630 --upsert
+  python -m prediction.build_hitter_snapshots --season 2025 --as-of 20250610 --upsert --preview 5
 """
 
 import argparse

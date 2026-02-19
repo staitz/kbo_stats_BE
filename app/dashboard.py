@@ -2,13 +2,15 @@ import os
 import pickle
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title='KBO Hitter Dashboard', layout='wide')
 
-DB_PATH = 'kbo_stats.db'
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = str(PROJECT_ROOT / 'kbo_stats.db')
 
 @st.cache_data(show_spinner=False)
 def load_table(query, params=None):
@@ -91,9 +93,9 @@ else:
 
 st.subheader('Validation (Latest Model)')
 model_season = season
-meta_path = f"models/hitter_model_meta_train{model_season}.json"
-hr_path = f"models/hitter_hr_model_train{model_season}.pkl"
-ops_path = f"models/hitter_ops_model_train{model_season}.pkl"
+meta_path = str(PROJECT_ROOT / f"models/hitter_model_meta_train{model_season}.json")
+hr_path = str(PROJECT_ROOT / f"models/hitter_hr_model_train{model_season}.pkl")
+ops_path = str(PROJECT_ROOT / f"models/hitter_ops_model_train{model_season}.pkl")
 
 if os.path.exists(hr_path) and os.path.exists(ops_path) and os.path.exists(meta_path):
     meta = load_table(

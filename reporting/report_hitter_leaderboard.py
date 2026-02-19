@@ -2,8 +2,8 @@ import argparse
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
-from kbo_db import DB_PATH
-from kbo_hitter_parser import calc_ops, _calc_tb  # reuse helper for OPS/TB
+from collector.kbo_db import DB_PATH
+from collector.kbo_hitter_parser import calc_ops, _calc_tb  # reuse helper for OPS/TB
 
 
 def _parse_args() -> argparse.Namespace:

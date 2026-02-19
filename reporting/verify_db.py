@@ -2,7 +2,7 @@ import argparse
 import sqlite3
 from typing import Optional
 
-from kbo_db import DB_PATH
+from collector.kbo_db import DB_PATH
 
 
 def _print_top_dates(conn: sqlite3.Connection) -> None:

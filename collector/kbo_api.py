@@ -14,7 +14,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-from kbo_hitter_parser import debug_hitter_shape, parse_hitter_rows
+from collector.kbo_hitter_parser import debug_hitter_shape, parse_hitter_rows
 
 SCHEDULE_PAGE_URL = "https://www.koreabaseball.com/Schedule/Schedule.aspx"
 GET_SCHEDULE_LIST_URL = "https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList"

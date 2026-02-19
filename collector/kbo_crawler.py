@@ -1,4 +1,4 @@
-from kbo_api import fetch_month_schedule, fetch_day_schedule
+from collector.kbo_api import fetch_month_schedule, fetch_day_schedule
 
 
 def main():

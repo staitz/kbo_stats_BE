@@ -7,8 +7,8 @@ from urllib.parse import urlencode
 
 from selenium.webdriver.common.by import By
 
-from kbo_api import _make_driver, _wait_ready
-from kbo_hitter_parser import parse_hitter_rows_from_dom_tables, parse_hitter_rows_from_html
+from collector.kbo_api import _make_driver, _wait_ready
+from collector.kbo_hitter_parser import parse_hitter_rows_from_dom_tables, parse_hitter_rows_from_html
 
 
 def _drain_perf_logs(driver) -> None:

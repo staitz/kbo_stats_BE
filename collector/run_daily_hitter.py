@@ -5,9 +5,9 @@ import time
 from typing import Any, Dict, Iterable, List, Tuple
 from zoneinfo import ZoneInfo
 
-from kbo_api import _make_driver, _wait_ready, fetch_day_schedule
-from kbo_db import DB_PATH, init_db, insert_rows, migrate_columns
-from kbo_hitter_parser import parse_hitter_rows_from_dom_tables
+from collector.kbo_api import _make_driver, _wait_ready, fetch_day_schedule
+from collector.kbo_db import DB_PATH, init_db, insert_rows, migrate_columns
+from collector.kbo_hitter_parser import parse_hitter_rows_from_dom_tables
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 

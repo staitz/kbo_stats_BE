@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $MyInvocation.MyCommand.Path)\..
 
 # Crawl: auto-detect season start from KBO schedule (current KST year)
-python run_range_hitter.py --auto-start --upsert
+python -m collector.run_range_hitter --auto-start --upsert
 
 # Snapshot range from existing logs for current season (KST year)
 $season = python -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('Asia/Seoul')).year)"
@@ -16,4 +16,4 @@ if ([string]::IsNullOrWhiteSpace($start) -or [string]::IsNullOrWhiteSpace($end))
   exit 0
 }
 
-python build_hitter_snapshots.py --db kbo_stats.db --season $season --start $start --end $end --upsert
+python -m prediction.build_hitter_snapshots --db kbo_stats.db --season $season --start $start --end $end --upsert
