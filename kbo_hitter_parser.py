@@ -5,7 +5,7 @@ KBO GameCenter hitter parser (minimum viable stats).
 
 Rules summary (extend as needed):
 - Ignore empty/blank event codes.
-- BB: contains "4구"
+- BB: contains walk tokens ("4구", "볼넷", "고의4구", etc.)
 - SO: contains "삼진"
 - HBP: contains "사구"
 - SH: contains "희번" or "희생번트"
@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 EVENT_RULES = {
     "ignore_tokens": {"", " ", "-", "0"},
-    "bb": ["4구"],
+    "bb": ["4구", "볼넷", "고4", "고의4구", "자동고의4구", "자동 고의4구", "고의 볼넷"],
     "so": ["삼진"],
     "hbp": ["사구"],
     "sf": ["희비", "희플"],
@@ -60,7 +60,8 @@ HITTER_COLUMN_ALIASES = {
     "2B": ["2루타", "2b", "2루"],
     "3B": ["3루타", "3b", "3루"],
     "HR": ["홈런", "hr"],
-    "BB": ["볼넷", "bb", "4구"],
+    "BB": ["볼넷", "bb", "4구", "고의4구", "자동고의4구", "자동 고의4구", "고의 볼넷"],
+    "IBB": ["고4", "고의4구", "자동고의4구", "자동 고의4구", "ibb"],
     "HBP": ["사구", "hbp"],
     "SH": ["희번", "희생번트", "sh"],
     "SF": ["희비", "희플", "희생플라이", "sf"],
@@ -559,6 +560,9 @@ def parse_hitter_rows_from_html(
             if not team:
                 team = team_hint or team_default
 
+            bb_total = _to_int_html(row_dict.get(mapped.get("BB"))) + _to_int_html(
+                row_dict.get(mapped.get("IBB"))
+            )
             row_out = {
                 "game_date": game_date,
                 "game_id": game_id,
@@ -567,7 +571,7 @@ def parse_hitter_rows_from_html(
                 "AB": _to_int_html(row_dict.get(mapped.get("AB"))),
                 "H": _to_int_html(row_dict.get(mapped.get("H"))),
                 "HR": _to_int_html(row_dict.get(mapped.get("HR"))),
-                "BB": _to_int_html(row_dict.get(mapped.get("BB"))),
+                "BB": bb_total,
                 "SO": _to_int_html(row_dict.get(mapped.get("SO"))),
             }
             rows.append(row_out)
@@ -790,7 +794,7 @@ def parse_hitter_rows_from_dom_tables(
             if _is_summary_player(player_name):
                 continue
 
-            row_dict = {headers[i]: row[i] if i < len(headers) else "" for i in range(len(headers))}
+            row_dict = {headers[i]: row[i] if i < len(row) else "" for i in range(len(headers))}
             stats_raw = {
                 "AB": _to_int_html(row_dict.get(mapped.get("AB"))),
                 "H": _to_int_html(row_dict.get(mapped.get("H"))),
@@ -798,6 +802,7 @@ def parse_hitter_rows_from_dom_tables(
                 "3B": _to_int_html(row_dict.get(mapped.get("3B"))),
                 "HR": _to_int_html(row_dict.get(mapped.get("HR"))),
                 "BB": _to_int_html(row_dict.get(mapped.get("BB"))),
+                "IBB": _to_int_html(row_dict.get(mapped.get("IBB"))),
                 "HBP": _to_int_html(row_dict.get(mapped.get("HBP"))),
                 "SH": _to_int_html(row_dict.get(mapped.get("SH"))),
                 "SF": _to_int_html(row_dict.get(mapped.get("SF"))),
@@ -834,13 +839,21 @@ def parse_hitter_rows_from_dom_tables(
             for key in ("2B", "3B", "HR", "BB", "HBP", "SH", "SF", "SO"):
                 if stats_raw.get(key, 0) == 0 and event_stats.get(key, 0) > 0:
                     stats_raw[key] = int(event_stats[key])
-            if stats_raw["PA"] == 0 and event_stats.get("PA", 0) > 0:
+            # KBO boxscore may split intentional walks into a separate "고4/IBB" column.
+            # Persist BB as total walks by folding IBB into BB.
+            stats_raw["BB"] = int(stats_raw.get("BB", 0)) + int(stats_raw.get("IBB", 0))
+            has_pa_column = mapped.get("PA") is not None
+            if not has_pa_column:
+                stats_raw["PA"] = 0
+            elif stats_raw["PA"] == 0 and event_stats.get("PA", 0) > 0:
                 stats_raw["PA"] = int(event_stats["PA"])
             # H는 기본 스탯 테이블 우선, 없으면 이벤트 기반
             if stats_raw["H"] == 0 and event_stats.get("H", 0) > 0:
                 stats_raw["H"] = int(event_stats["H"])
             if stats_raw["TB"] == 0:
                 stats_raw["TB"] = _calc_tb(stats_raw)
+            # REVIEW 섹션은 PA 컬럼이 없는 경우가 많아서 이벤트 PA를 그대로 쓰면
+            # 행 오프셋/교체 표기로 인해 AB+BB+HBP+SF+SH와 어긋날 수 있다.
             if stats_raw["PA"] == 0:
                 stats_raw["PA"] = (
                     stats_raw["AB"]
@@ -1253,7 +1266,8 @@ def _parse_stats_table(table: Any) -> List[Dict[str, Any]]:
         "2B": ["2루타", "2b", "2루"],
         "3B": ["3루타", "3b", "3루"],
         "HR": ["홈런", "hr"],
-        "BB": ["볼넷", "bb", "4구"],
+        "BB": ["볼넷", "bb", "4구", "고의4구", "자동고의4구", "자동 고의4구", "고의 볼넷"],
+        "IBB": ["고4", "고의4구", "자동고의4구", "자동 고의4구", "ibb"],
         "HBP": ["사구", "hbp"],
         "SO": ["삼진", "so"],
         "SH": ["희번", "희생번트", "sh"],
@@ -1265,6 +1279,7 @@ def _parse_stats_table(table: Any) -> List[Dict[str, Any]]:
         team = _get_value_by_keys(row_dict, ["팀", "구단", "team", "club"])
         events = _extract_events_from_row(row_dict)
         stat_values = {k: _to_int(_get_value_by_keys(row_dict, v)) for k, v in stat_keys.items()}
+        stat_values["BB"] = int(stat_values.get("BB", 0)) + int(stat_values.get("IBB", 0))
         stats_rows.append(
             {
                 "player_name": name,
