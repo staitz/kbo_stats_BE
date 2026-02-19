@@ -181,16 +181,25 @@ latest_date = latest.iloc[0]['latest_date'] if not latest.empty else None
 if latest_date:
     pred_df = load_table(
         """
-        SELECT team, player_name, predicted_hr_final, predicted_ops_final, confidence_level
+        SELECT team, player_name, predicted_hr_final, predicted_ops_final,
+               confidence_level, pa_to_date, blend_weight, model_source
         FROM hitter_predictions
         WHERE season = ? AND as_of_date = ?
         ORDER BY predicted_ops_final DESC
-        LIMIT 20
+        LIMIT 50
         """,
         params=(season, latest_date)
     )
     st.caption(f'Latest predictions as_of_date={latest_date}')
-    st.dataframe(pred_df, use_container_width=True)
+    if not pred_df.empty:
+        pred_view = pred_df.copy()
+        pred_view["predicted_hr_final"] = pred_view["predicted_hr_final"].round(2)
+        pred_view["predicted_ops_final"] = pred_view["predicted_ops_final"].round(4)
+        pred_view["pa_to_date"] = pred_view["pa_to_date"].round(0)
+        pred_view["blend_weight"] = pred_view["blend_weight"].round(3)
+        st.dataframe(pred_view, use_container_width=True)
+    else:
+        st.info('No prediction rows for latest date.')
 else:
     st.info('No predictions found for this season.')
 
@@ -209,3 +218,20 @@ if not conf_df.empty:
     st.bar_chart(conf_df.set_index('confidence_level'))
 else:
     st.info('No confidence data available.')
+
+st.subheader('Prediction Source Distribution')
+source_df = load_table(
+    """
+    SELECT model_source, COUNT(*) AS cnt
+    FROM hitter_predictions
+    WHERE season = ?
+    GROUP BY model_source
+    ORDER BY cnt DESC
+    """,
+    params=(season,)
+)
+if not source_df.empty:
+    st.bar_chart(source_df.set_index('model_source'))
+    st.dataframe(source_df, use_container_width=True)
+else:
+    st.info('No model source data available.')
