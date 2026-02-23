@@ -303,3 +303,52 @@ class ApiEndpointsTest(TestCase):
         self.assertEqual(data["requested_season"], 2026)
         self.assertEqual(data["effective_season"], 2025)
         self.assertEqual(data["mode"], "PRESEASON_FALLBACK")
+
+
+class ApiErrorHandlingTest(TestCase):
+    def test_player_compare_error_format(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS hitter_season_totals (
+                    season INTEGER NOT NULL,
+                    team TEXT NOT NULL,
+                    player_name TEXT NOT NULL,
+                    games INTEGER NOT NULL DEFAULT 0,
+                    PA INTEGER NOT NULL DEFAULT 0,
+                    AB INTEGER NOT NULL DEFAULT 0,
+                    H INTEGER NOT NULL DEFAULT 0,
+                    "2B" INTEGER NOT NULL DEFAULT 0,
+                    "3B" INTEGER NOT NULL DEFAULT 0,
+                    HR INTEGER NOT NULL DEFAULT 0,
+                    TB_adj INTEGER NOT NULL DEFAULT 0,
+                    RBI INTEGER NOT NULL DEFAULT 0,
+                    BB INTEGER NOT NULL DEFAULT 0,
+                    SO INTEGER NOT NULL DEFAULT 0,
+                    HBP INTEGER NOT NULL DEFAULT 0,
+                    SH INTEGER NOT NULL DEFAULT 0,
+                    SF INTEGER NOT NULL DEFAULT 0,
+                    SB INTEGER NOT NULL DEFAULT 0,
+                    CS INTEGER NOT NULL DEFAULT 0,
+                    GDP INTEGER NOT NULL DEFAULT 0,
+                    AVG REAL NOT NULL DEFAULT 0,
+                    OBP REAL NOT NULL DEFAULT 0,
+                    SLG REAL NOT NULL DEFAULT 0,
+                    OPS REAL NOT NULL DEFAULT 0
+                )
+                """
+            )
+        res = self.client.get("/api/players/compare?season=2025&names=onlyone")
+        self.assertEqual(res.status_code, 400)
+        data = res.json()
+        self.assertEqual(data["error"], "at_least_two_names_required")
+        self.assertIn("detail", data)
+
+    def test_missing_required_table_returns_non_500(self):
+        with connection.cursor() as cursor:
+            cursor.execute("DROP TABLE IF EXISTS hitter_season_totals")
+        res = self.client.get("/api/leaderboard?season=2025")
+        self.assertEqual(res.status_code, 503)
+        data = res.json()
+        self.assertEqual(data["error"], "missing_table")
+        self.assertIn("detail", data)
