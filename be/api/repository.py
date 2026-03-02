@@ -20,6 +20,15 @@ def table_exists(table_name: str) -> bool:
     return table_name in connection.introspection.table_names()
 
 
+def table_has_column(table_name: str, column_name: str) -> bool:
+    if not table_exists(table_name):
+        return False
+    with connection.cursor() as cursor:
+        description = connection.introspection.get_table_description(cursor, table_name)
+    names = {col.name for col in description}
+    return column_name in names
+
+
 def default_season() -> int | None:
     if not table_exists("hitter_season_totals"):
         return None
@@ -51,6 +60,12 @@ def leaderboard_candidate_count(season: int, min_pa: int, team: str = "") -> int
         tuple(params),
     )
     return int((row or {}).get("total") or 0)
+
+
+def hitter_totals_fallback_season(requested_season: int) -> int | None:
+    row = query_one("SELECT MAX(season) AS season FROM hitter_season_totals WHERE season < %s", (requested_season,))
+    value = (row or {}).get("season")
+    return int(value) if value else None
 
 
 def latest_standings_as_of(season: int) -> str | None:
@@ -107,7 +122,7 @@ def latest_prediction_date(season: int) -> str | None:
 def top_ops_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any]]:
     return query_all(
         """
-        SELECT team, player_name, PA, HR, OPS
+        SELECT team, player_name, PA, H, HR, RBI, OPS
         FROM hitter_season_totals
         WHERE season = %s AND PA >= %s
         ORDER BY OPS DESC, PA DESC
@@ -117,16 +132,95 @@ def top_ops_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any
     )
 
 
+def top_avg_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any]]:
+    return query_all(
+        """
+        SELECT team, player_name, PA, H, HR, RBI, AVG, OPS
+        FROM hitter_season_totals
+        WHERE season = %s AND PA >= %s
+        ORDER BY AVG DESC, PA DESC
+        LIMIT %s
+        """,
+        (season, min_pa, limit),
+    )
+
+
 def top_hr_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any]]:
     return query_all(
         """
-        SELECT team, player_name, PA, HR, OPS
+        SELECT team, player_name, PA, H, HR, RBI, OPS
         FROM hitter_season_totals
         WHERE season = %s AND PA >= %s
         ORDER BY HR DESC, PA DESC
         LIMIT %s
         """,
         (season, min_pa, limit),
+    )
+
+
+def top_war_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any]]:
+    # Prefer real WAR column if it exists.
+    if table_has_column("hitter_season_totals", "WAR"):
+        return query_all(
+            """
+            SELECT team, player_name, PA, H, HR, RBI, OPS, WAR
+            FROM hitter_season_totals
+            WHERE season = %s AND PA >= %s
+            ORDER BY WAR DESC, PA DESC
+            LIMIT %s
+            """,
+            (season, min_pa, limit),
+        )
+
+    # Fallback: pseudo-WAR approximation from OPS and PA to keep UI populated.
+    return query_all(
+        """
+        SELECT
+            team,
+            player_name,
+            PA,
+            H,
+            HR,
+            RBI,
+            OPS,
+            ROUND(((OPS - 0.700) * PA) / 70.0, 2) AS WAR
+        FROM hitter_season_totals
+        WHERE season = %s AND PA >= %s
+        ORDER BY WAR DESC, PA DESC
+        LIMIT %s
+        """,
+        (season, min_pa, limit),
+    )
+
+
+def top_era_rows(season: int, limit: int = 5) -> list[dict[str, Any]]:
+    # No pitcher table in current MVP DB; derive team run-prevention ranking (RA/G) from game logs.
+    if not table_exists("hitter_game_logs"):
+        return []
+
+    return query_all(
+        """
+        WITH team_scores AS (
+            SELECT game_id, team, COALESCE(SUM(R), 0) AS runs
+            FROM hitter_game_logs
+            WHERE substr(game_date, 1, 4) = %s
+            GROUP BY game_id, team
+        ),
+        paired AS (
+            SELECT a.game_id, a.team AS team, b.runs AS runs_allowed
+            FROM team_scores a
+            JOIN team_scores b ON a.game_id = b.game_id AND a.team <> b.team
+        )
+        SELECT
+            team,
+            team || ' Staff' AS player_name,
+            ROUND(1.0 * SUM(runs_allowed) / COUNT(*), 3) AS ERA
+        FROM paired
+        GROUP BY team
+        ORDER BY ERA ASC, team ASC
+        LIMIT %s
+        """,
+        (str(season), limit),
     )
 
 

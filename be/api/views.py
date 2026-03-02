@@ -177,26 +177,47 @@ def standings(request):
 
 @require_GET
 def home_summary(request):
-    season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
+    requested_season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
+    season = requested_season
+    mode = "SEASON_MATCH"
     min_pa_raw = request.GET.get("min_pa")
 
     missing = _missing_required_tables(["hitter_season_totals"])
     if missing:
         return _error_json("missing_table", f"required table missing: {', '.join(missing)}", 503)
 
-    if min_pa_raw is None or str(min_pa_raw).strip() == "":
-        min_pa = _season_progress_min_pa(season)
-        min_pa_policy = "AUTO_BY_SEASON_PROGRESS"
-    else:
-        min_pa = _parse_int(min_pa_raw, 100, min_value=0, max_value=700)
-        min_pa_policy = "MANUAL"
-
     try:
+        # --- season fallback FIRST, so min_pa is calculated on the final season ---
+        if repo.leaderboard_candidate_count(season=season, min_pa=0) == 0:
+            fallback_season = repo.hitter_totals_fallback_season(requested_season)
+            if fallback_season:
+                season = fallback_season
+                mode = "PRESEASON_FALLBACK"
+
+        # --- min_pa: auto or manual, always based on the resolved season ---
+        if min_pa_raw is None or str(min_pa_raw).strip() == "":
+            min_pa = _season_progress_min_pa(season)
+            min_pa_policy = "AUTO_BY_SEASON_PROGRESS"
+        else:
+            min_pa = _parse_int(min_pa_raw, 100, min_value=0, max_value=700)
+            min_pa_policy = "MANUAL"
+
+        effective_min_pa = _pick_effective_min_pa_for_leaderboard(
+            season=season,
+            team="",
+            base_min_pa=min_pa,
+            auto_relax=True,
+            min_count=5,
+        )
+
         base = repo.home_base_totals(season)
         latest_game = repo.latest_game_date(season) if repo.table_exists("hitter_game_logs") else None
         latest_pred = repo.latest_prediction_date(season) if repo.table_exists("hitter_predictions") else None
-        top_ops = repo.top_ops_rows(season, min_pa, 5)
-        top_hr = repo.top_hr_rows(season, min_pa, 5)
+        top_avg = repo.top_avg_rows(season, effective_min_pa, 5)
+        top_ops = repo.top_ops_rows(season, effective_min_pa, 5)
+        top_hr = repo.top_hr_rows(season, effective_min_pa, 5)
+        top_era = repo.top_era_rows(season, 5)
+        top_war = repo.top_war_rows(season, effective_min_pa, 5)
 
         standings_preview: list[dict[str, Any]] = []
         standings_as_of = None
@@ -208,12 +229,22 @@ def home_summary(request):
         return JsonResponse(
             {
                 "season": season,
+                "requested_season": requested_season,
+                "effective_season": season,
+                "mode": mode,
                 "latest_game_date": latest_game,
                 "latest_prediction_date": latest_pred,
                 "totals": base,
                 "min_pa": min_pa,
+                "effective_min_pa": effective_min_pa,
                 "min_pa_policy": min_pa_policy,
-                "leaderboards": {"ops_top5": top_ops, "hr_top5": top_hr},
+                "leaderboards": {
+                    "avg_top5": top_avg,
+                    "hr_top5": top_hr,
+                    "ops_top5": top_ops,
+                    "era_top5": top_era,
+                    "war_top5": top_war,
+                },
                 "standings_preview": {
                     "as_of_date": standings_as_of,
                     "rows": standings_preview,
@@ -371,10 +402,13 @@ def player_detail(request, player_name: str):
                 sf = int(row.get("SF") or 0)
                 tb = int(row.get("TB_adj") or 0)
                 obp_den = ab + bb + hbp + sf
-                row["AVG"] = round(h / ab, 4) if ab > 0 else 0.0
-                row["OBP"] = round((h + bb + hbp) / obp_den, 4) if obp_den > 0 else 0.0
-                row["SLG"] = round(tb / ab, 4) if ab > 0 else 0.0
-                row["OPS"] = round(row["OBP"] + row["SLG"], 4)
+                avg = float(h / ab) if ab > 0 else 0.0
+                obp = float(h + bb + hbp) / obp_den if obp_den > 0 else 0.0
+                slg = float(tb / ab) if ab > 0 else 0.0
+                row["AVG"] = round(avg, 4)  # pyre-ignore
+                row["OBP"] = round(obp, 4)  # pyre-ignore
+                row["SLG"] = round(slg, 4)  # pyre-ignore
+                row["OPS"] = round(obp + slg, 4)  # pyre-ignore
 
             vs_team = repo.player_vs_team_rows(player_name=name, season=season, tb_expr=_safe_tb_expr("TB"))
             for row in vs_team:
@@ -382,10 +416,13 @@ def player_detail(request, player_name: str):
                 h = int(row.get("H") or 0)
                 bb = int(row.get("BB") or 0)
                 tb = int(row.get("TB_adj") or 0)
-                row["AVG"] = round(h / ab, 4) if ab > 0 else 0.0
-                row["OBP"] = round((h + bb) / (ab + bb), 4) if (ab + bb) > 0 else 0.0
-                row["SLG"] = round(tb / ab, 4) if ab > 0 else 0.0
-                row["OPS"] = round(row["OBP"] + row["SLG"], 4)
+                avg = float(h / ab) if ab > 0 else 0.0
+                obp = float(h + bb) / (ab + bb) if (ab + bb) > 0 else 0.0
+                slg = float(tb / ab) if ab > 0 else 0.0
+                row["AVG"] = round(avg, 4)  # pyre-ignore
+                row["OBP"] = round(obp, 4)  # pyre-ignore
+                row["SLG"] = round(slg, 4)  # pyre-ignore
+                row["OPS"] = round(obp + slg, 4)  # pyre-ignore
 
             recent_games = repo.player_recent_games_rows(player_name=name, season=season, recent_n=recent_n)
             for row in recent_games:
@@ -393,10 +430,13 @@ def player_detail(request, player_name: str):
                 h = int(row.get("H") or 0)
                 bb = int(row.get("BB") or 0)
                 tb = int(row.get("TB") or 0)
-                row["AVG"] = round(h / ab, 4) if ab > 0 else 0.0
-                row["OBP"] = round((h + bb) / (ab + bb), 4) if (ab + bb) > 0 else 0.0
-                row["SLG"] = round(tb / ab, 4) if ab > 0 else 0.0
-                row["OPS"] = round(row["OBP"] + row["SLG"], 4)
+                avg = float(h / ab) if ab > 0 else 0.0
+                obp = float(h + bb) / (ab + bb) if (ab + bb) > 0 else 0.0
+                slg = float(tb / ab) if ab > 0 else 0.0
+                row["AVG"] = round(avg, 4)
+                row["OBP"] = round(obp, 4)
+                row["SLG"] = round(slg, 4)
+                row["OPS"] = round(obp + slg, 4)
 
         current_agg = repo.player_current_aggregate(
             season=season,
