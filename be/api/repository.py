@@ -49,6 +49,31 @@ def season_game_window(season: int) -> dict[str, Any] | None:
     )
 
 
+def max_team_games(season: int, team: str = "") -> int:
+    if not table_exists("hitter_game_logs"):
+        return 0
+    where = ["substr(game_date, 1, 4) = %s"]
+    params: list[Any] = [str(season)]
+    if team:
+        where.append("team = %s")
+        params.append(team)
+    
+    where_sql = " AND ".join(where)
+    row = query_one(
+        f"""
+        SELECT MAX(team_games) AS max_games
+        FROM (
+            SELECT team, COUNT(DISTINCT game_id) AS team_games
+            FROM hitter_game_logs
+            WHERE {where_sql}
+            GROUP BY team
+        )
+        """,
+        tuple(params),
+    )
+    return int((row or {}).get("max_games") or 0)
+
+
 def leaderboard_candidate_count(season: int, min_pa: int, team: str = "") -> int:
     where = ["season = %s", "PA >= %s"]
     params: list[Any] = [season, min_pa]
@@ -138,7 +163,7 @@ def top_avg_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any
         SELECT team, player_name, PA, H, HR, RBI, AVG, OPS
         FROM hitter_season_totals
         WHERE season = %s AND PA >= %s
-        ORDER BY AVG DESC, PA DESC
+        ORDER BY (H + 27.0) / (AB + 100.0) DESC, PA DESC
         LIMIT %s
         """,
         (season, min_pa, limit),
@@ -213,7 +238,7 @@ def top_era_rows(season: int, limit: int = 5) -> list[dict[str, Any]]:
         )
         SELECT
             team,
-            team || ' Staff' AS player_name,
+            team AS player_name,
             ROUND(1.0 * SUM(runs_allowed) / COUNT(*), 3) AS ERA
         FROM paired
         GROUP BY team
@@ -261,12 +286,17 @@ def leaderboard_rows(
         where.append("team = %s")
         params.append(team)
     where_sql = " AND ".join(where)
+
+    order_clause = f"{order_metric} DESC"
+    if order_metric == "AVG":
+        order_clause = "(H + 27.0) / (AB + 100.0) DESC"
+
     return query_all(
         f"""
         SELECT team, player_name, games, PA, AB, H, HR, RBI, AVG, OBP, SLG, OPS
         FROM hitter_season_totals
         WHERE {where_sql}
-        ORDER BY {order_metric} DESC, PA DESC, player_name ASC
+        ORDER BY {order_clause}, PA DESC, player_name ASC
         LIMIT %s OFFSET %s
         """,
         tuple(params + [limit, offset]),
