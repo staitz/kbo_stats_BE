@@ -43,22 +43,9 @@ def _parse_yyyymmdd(value: str) -> datetime | None:
         return None
 
 
-def _season_progress_min_pa(season: int) -> int:
-    if not repo.table_exists("hitter_game_logs"):
-        return 30
-    window = repo.season_game_window(season)
-    min_date = _parse_yyyymmdd((window or {}).get("min_date") or "")
-    max_date = _parse_yyyymmdd((window or {}).get("max_date") or "")
-    if not min_date or not max_date:
-        return 30
-    days = max(0, (max_date - min_date).days)
-    if days < 14:
-        return 30
-    if days < 35:
-        return 50
-    if days < 49:
-        return 70
-    return 100
+def _season_progress_min_pa(season: int, team: str = "") -> int:
+    max_games = repo.max_team_games(season, team)
+    return int(max_games * 3.1)
 
 
 def _pick_effective_min_pa_for_leaderboard(
@@ -206,7 +193,7 @@ def home_summary(request):
             season=season,
             team="",
             base_min_pa=min_pa,
-            auto_relax=True,
+            auto_relax=False,
             min_count=5,
         )
 
@@ -216,7 +203,9 @@ def home_summary(request):
         top_avg = repo.top_avg_rows(season, effective_min_pa, 5)
         top_ops = repo.top_ops_rows(season, effective_min_pa, 5)
         top_hr = repo.top_hr_rows(season, effective_min_pa, 5)
-        top_era = repo.top_era_rows(season, 5)
+        # Pitcher dataset is not available yet in this MVP.
+        # Keep ERA card empty on the frontend until pitcher stats are integrated.
+        top_era: list[dict[str, Any]] = []
         top_war = repo.top_war_rows(season, effective_min_pa, 5)
 
         standings_preview: list[dict[str, Any]] = []
@@ -272,13 +261,13 @@ def leaderboard(request):
         return _error_json("missing_table", f"required table missing: {', '.join(missing)}", 503)
 
     if min_pa_raw is None or str(min_pa_raw).strip() == "":
-        requested_min_pa = _season_progress_min_pa(season)
-        min_pa_policy = "AUTO_BY_SEASON_PROGRESS_WITH_RELAX"
+        requested_min_pa = _season_progress_min_pa(season, team)
+        min_pa_policy = "AUTO_BY_SEASON_PROGRESS"
         min_pa = _pick_effective_min_pa_for_leaderboard(
             season=season,
             team=team,
             base_min_pa=requested_min_pa,
-            auto_relax=True,
+            auto_relax=False,
         )
     else:
         requested_min_pa = _parse_int(min_pa_raw, 100, min_value=0, max_value=700)
@@ -433,10 +422,10 @@ def player_detail(request, player_name: str):
                 avg = float(h / ab) if ab > 0 else 0.0
                 obp = float(h + bb) / (ab + bb) if (ab + bb) > 0 else 0.0
                 slg = float(tb / ab) if ab > 0 else 0.0
-                row["AVG"] = round(avg, 4)
-                row["OBP"] = round(obp, 4)
-                row["SLG"] = round(slg, 4)
-                row["OPS"] = round(obp + slg, 4)
+                row["AVG"] = round(avg, 4)  # pyre-ignore
+                row["OBP"] = round(obp, 4)  # pyre-ignore
+                row["SLG"] = round(slg, 4)  # pyre-ignore
+                row["OPS"] = round(obp + slg, 4)  # pyre-ignore
 
         current_agg = repo.player_current_aggregate(
             season=season,
@@ -502,15 +491,15 @@ def team_detail(request, team: str):
         return _error_json("missing_table", f"required table missing: {', '.join(missing)}", 503)
 
     if min_pa_raw is None or str(min_pa_raw).strip() == "":
-        requested_min_pa = _season_progress_min_pa(season)
+        requested_min_pa = _season_progress_min_pa(season, name)
         effective_min_pa = _pick_effective_min_pa_for_leaderboard(
             season=season,
             team=name,
             base_min_pa=requested_min_pa,
-            auto_relax=True,
+            auto_relax=False,
             min_count=5,
         )
-        min_pa_policy = "AUTO_BY_SEASON_PROGRESS_WITH_RELAX"
+        min_pa_policy = "AUTO_BY_SEASON_PROGRESS"
     else:
         requested_min_pa = _parse_int(min_pa_raw, 100, min_value=0, max_value=700)
         effective_min_pa = requested_min_pa
@@ -534,8 +523,8 @@ def team_detail(request, team: str):
                 bb = int(row.get("BB") or 0)
                 so = int(row.get("SO") or 0)
                 tb = int(row.get("TB_adj") or 0)
-                row["AVG"] = round(h / ab, 4) if ab > 0 else 0.0
-                row["SLG"] = round(tb / ab, 4) if ab > 0 else 0.0
+                row["AVG"] = round(h / ab, 4) if ab > 0 else 0.0 # pyre-ignore
+                row["SLG"] = round(tb / ab, 4) if ab > 0 else 0.0 # pyre-ignore
                 row["BB_K"] = round(bb / so, 4) if so > 0 else None
 
             recent_games = repo.team_recent_games(team=name, season=season, limit=20)
