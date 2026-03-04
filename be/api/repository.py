@@ -162,9 +162,7 @@ def top_avg_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any
         """
         SELECT team, player_name, PA, H, HR, RBI, AVG, OPS
         FROM hitter_season_totals
-        WHERE season = %s AND PA >= %s
-        ORDER BY (H + 27.0) / (AB + 100.0) DESC, PA DESC
-        LIMIT %s
+        ORDER BY AVG DESC, PA DESC
         """,
         (season, min_pa, limit),
     )
@@ -289,7 +287,7 @@ def leaderboard_rows(
 
     order_clause = f"{order_metric} DESC"
     if order_metric == "AVG":
-        order_clause = "(H + 27.0) / (AB + 100.0) DESC"
+        order_clause = "AVG DESC"
 
     return query_all(
         f"""
