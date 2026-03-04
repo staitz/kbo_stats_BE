@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
+.venv/
+be/.venv/
 .kbo_session.json
 xhr_dump_20250610/
 debug_*.html
