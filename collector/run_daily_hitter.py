@@ -5,9 +5,8 @@ import time
 from typing import Any, Dict, Iterable, List, Tuple
 from zoneinfo import ZoneInfo
 
-from collector.kbo_api import _make_driver, _wait_ready, fetch_day_schedule
+from collector.kbo_naver_crawler import fetch_day_schedule, parse_naver_boxscore
 from collector.kbo_db import DB_PATH, init_db, insert_rows, migrate_columns
-from collector.kbo_hitter_parser import parse_hitter_rows_from_dom_tables
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 
@@ -18,88 +17,21 @@ def _today_yyyymmdd_kst() -> str:
     return dt.datetime.now(KST).strftime("%Y%m%d")
 
 
-def _extract_dom_tables(driver) -> List[Dict[str, Any]]:
-    # DOM 테이블을 직접 수집해 파서에 전달
-    return driver.execute_script(
-        """
-        function findTeamLabel(el) {
-          let cur = el;
-          for (let i = 0; i < 6 && cur; i++) {
-            const prev = cur.previousElementSibling;
-            if (prev && prev.innerText) {
-              const lines = prev.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
-              for (const line of lines) {
-                if (line.includes('타자 기록')) {
-                  return line;
-                }
-              }
-            }
-            cur = cur.parentElement;
-          }
-          return '';
-        }
-
-        const tables = Array.from(document.querySelectorAll('table'));
-        return tables.map((tbl, idx) => {
-          const headers = [];
-          const rows = [];
-          const headerCells = tbl.querySelectorAll('thead tr th');
-          if (headerCells.length) {
-            headerCells.forEach(h => headers.push((h.innerText || '').trim()));
-          } else {
-            const firstRow = tbl.querySelector('tr');
-            if (firstRow) {
-              firstRow.querySelectorAll('th,td').forEach(c => headers.push((c.innerText || '').trim()));
-            }
-          }
-          const bodyRows = tbl.querySelectorAll('tbody tr');
-          const targetRows = bodyRows.length ? bodyRows : tbl.querySelectorAll('tr');
-          targetRows.forEach(tr => {
-            const cells = Array.from(tr.querySelectorAll('th,td')).map(c => (c.innerText || '').trim());
-            if (cells.length) rows.push(cells);
-          });
-          return {
-            index: idx,
-            team: findTeamLabel(tbl),
-            headers: headers,
-            rows: rows,
-            text: (tbl.innerText || '').trim()
-          };
-        });
-        """
-    )
-
-
 def _fetch_rows_for_game(
     driver,
     game_date: str,
     game_id: str,
     away_team: str,
     home_team: str,
-    sections: Iterable[str] = ("REVIEW", "BOX", "RECORD"),
 ) -> List[Dict[str, Any]]:
-    for section in sections:
-        url = (
-            "https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx"
-            f"?gameDate={game_date}&gameId={game_id}&section={section}"
-        )
-        driver.get(url)
-        _wait_ready(driver, 15)
-        time.sleep(2)
-
-        dom_tables = _extract_dom_tables(driver)
-        rows = parse_hitter_rows_from_dom_tables(
-            tables=dom_tables or [],
-            game_date=game_date,
-            game_id=game_id,
-            away_team=away_team,
-            home_team=home_team,
-            debug=False,
-        )
-        if rows:
-            return rows
-    return []
-
+    # driver argument is kept for compatibility but not used for Naver (unless fallback needed)
+    return parse_naver_boxscore(
+        game_id=game_id,
+        game_date=game_date,
+        away_team=away_team,
+        home_team=home_team,
+        debug=False
+    )
 
 def _record_failed_date(game_date: str, reason: str) -> None:
     with open("failed_dates.txt", "a", encoding="utf-8") as f:
