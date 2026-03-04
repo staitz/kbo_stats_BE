@@ -3,7 +3,7 @@ import datetime as dt
 from typing import List
 from zoneinfo import ZoneInfo
 
-from collector.kbo_api import find_season_start_date
+from collector.kbo_naver_crawler import find_season_start_date
 from collector.run_daily_hitter import collect_for_dates
 
 
@@ -50,6 +50,10 @@ def main() -> None:
 
     if not start:
         raise ValueError("start date is required (or use --auto-start)")
+
+    if end < start:
+        print(f"[run] start={start} end={end} => no dates to collect (pre-season)")
+        return
 
     dates = _iter_dates(start, end)
     print(
