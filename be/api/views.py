@@ -249,7 +249,9 @@ def home_summary(request):
 
 @require_GET
 def leaderboard(request):
-    season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
+    requested_season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
+    season = requested_season
+    mode = "SEASON_MATCH"
     metric = str(request.GET.get("metric", "OPS")).upper().strip()
     min_pa_raw = request.GET.get("min_pa")
     team = str(request.GET.get("team", "")).strip()
@@ -260,6 +262,13 @@ def leaderboard(request):
     if missing:
         return _error_json("missing_table", f"required table missing: {', '.join(missing)}", 503)
 
+    # Keep leaderboard behavior consistent with standings/home_summary.
+    if repo.leaderboard_candidate_count(season=season, min_pa=0, team=team) == 0:
+        fallback_season = repo.hitter_totals_fallback_season(requested_season)
+        if fallback_season:
+            season = fallback_season
+            mode = "PRESEASON_FALLBACK"
+
     if min_pa_raw is None or str(min_pa_raw).strip() == "":
         requested_min_pa = _season_progress_min_pa(season, team)
         min_pa_policy = "AUTO_BY_SEASON_PROGRESS"
@@ -267,7 +276,8 @@ def leaderboard(request):
             season=season,
             team=team,
             base_min_pa=requested_min_pa,
-            auto_relax=False,
+            auto_relax=True,
+            min_count=5 if team else 20,
         )
     else:
         requested_min_pa = _parse_int(min_pa_raw, 100, min_value=0, max_value=700)
@@ -299,6 +309,9 @@ def leaderboard(request):
         return JsonResponse(
             {
                 "season": season,
+                "requested_season": requested_season,
+                "effective_season": season,
+                "mode": mode,
                 "metric": order_metric,
                 "requested_min_pa": requested_min_pa,
                 "effective_min_pa": min_pa,

@@ -162,7 +162,9 @@ def top_avg_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any
         """
         SELECT team, player_name, PA, H, HR, RBI, AVG, OPS
         FROM hitter_season_totals
+        WHERE season = %s AND PA >= %s
         ORDER BY AVG DESC, PA DESC
+        LIMIT %s
         """,
         (season, min_pa, limit),
     )

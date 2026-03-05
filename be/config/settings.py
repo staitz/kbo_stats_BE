@@ -117,3 +117,13 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
+
+# Allow local frontend dev servers on different ports (3001, 5173, etc.).
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^http://localhost:\d+$",
+    r"^http://127\.0\.0\.1:\d+$",
+    r"^http://0\.0\.0\.0:\d+$",
+]
+
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
