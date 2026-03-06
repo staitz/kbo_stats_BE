@@ -14,6 +14,15 @@ Assert-LastExit "collector.run_range_hitter"
 # Snapshot range from existing logs for current season (KST year)
 $season = (python -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('Asia/Seoul')).year)").Trim()
 $env:KBO_SEASON = "$season"
+
+# Sync team schedule from KBO official schedule API for current season
+python -m collector.sync_team_schedule --db kbo_stats.db --season $season
+Assert-LastExit "collector.sync_team_schedule"
+
+# Sync team standings snapshot from KBO official standings page
+python -m collector.fetch_kbo_team_standings --db kbo_stats.db --season $season --source auto
+Assert-LastExit "collector.fetch_kbo_team_standings"
+
 $range = @'
 import os
 import sqlite3
