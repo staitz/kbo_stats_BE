@@ -114,29 +114,9 @@ def health(_request):
 def standings(request):
     requested_season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
     season = requested_season
-    mode = "SEASON_MATCH"
 
     try:
-        if not repo.table_exists("team_standings"):
-            return JsonResponse(
-                {
-                    "requested_season": requested_season,
-                    "effective_season": None,
-                    "as_of_date": None,
-                    "mode": "NO_DATA",
-                    "rows": [],
-                }
-            )
-
-        as_of_date = repo.latest_standings_as_of(requested_season)
-
-        if not as_of_date:
-            fallback_season = repo.standings_fallback_season(requested_season)
-            if fallback_season:
-                season = fallback_season
-                mode = "PRESEASON_FALLBACK"
-                as_of_date = repo.latest_standings_as_of(season)
-
+        as_of_date = repo.logs_latest_game_date(season)
         if not as_of_date:
             return JsonResponse(
                 {
@@ -148,13 +128,13 @@ def standings(request):
                 }
             )
 
-        rows = repo.standings_rows(season, as_of_date)
+        rows = repo.computed_standings_rows(season)
         return JsonResponse(
             {
                 "requested_season": requested_season,
                 "effective_season": season,
                 "as_of_date": as_of_date,
-                "mode": mode,
+                "mode": "SEASON_MATCH",
                 "rows": rows,
             }
         )
@@ -174,12 +154,30 @@ def home_summary(request):
         return _error_json("missing_table", f"required table missing: {', '.join(missing)}", 503)
 
     try:
-        # --- season fallback FIRST, so min_pa is calculated on the final season ---
         if repo.leaderboard_candidate_count(season=season, min_pa=0) == 0:
-            fallback_season = repo.hitter_totals_fallback_season(requested_season)
-            if fallback_season:
-                season = fallback_season
-                mode = "PRESEASON_FALLBACK"
+            return JsonResponse(
+                {
+                    "season": requested_season,
+                    "requested_season": requested_season,
+                    "effective_season": None,
+                    "mode": "NO_DATA",
+                    "latest_game_date": None,
+                    "latest_prediction_date": None,
+                    "totals": {"players": 0, "teams": 0, "total_hr": 0, "total_pa": 0},
+                    "min_pa": 0,
+                    "effective_min_pa": 0,
+                    "min_pa_policy": "AUTO_BY_SEASON_PROGRESS",
+                    "leaderboards": {
+                        "avg_top5": [],
+                        "hr_top5": [],
+                        "ops_top5": [],
+                        "era_top5": [],
+                        "war_top5": [],
+                    },
+                    "standings_preview": {"as_of_date": None, "rows": []},
+                    "notes": ["아직 데이터가 없습니다."],
+                }
+            )
 
         # --- min_pa: auto or manual, always based on the resolved season ---
         if min_pa_raw is None or str(min_pa_raw).strip() == "":
@@ -208,12 +206,8 @@ def home_summary(request):
         top_era: list[dict[str, Any]] = []
         top_war = repo.top_war_rows(season, effective_min_pa, 5)
 
-        standings_preview: list[dict[str, Any]] = []
-        standings_as_of = None
-        if repo.table_exists("team_standings"):
-            standings_as_of = repo.latest_standings_as_of(season)
-            if standings_as_of:
-                standings_preview = repo.standings_preview_rows(season, standings_as_of, 10)
+        standings_as_of = repo.logs_latest_game_date(season)
+        standings_preview = repo.computed_standings_rows(season)[:10]
 
         return JsonResponse(
             {
@@ -239,7 +233,7 @@ def home_summary(request):
                     "rows": standings_preview,
                 },
                 "notes": [
-                    "pitcher and team standings endpoints are not included in hitter-only MVP",
+                    "standings are derived from Naver-based hitter_game_logs by game result aggregation",
                 ],
             }
         )
@@ -262,12 +256,24 @@ def leaderboard(request):
     if missing:
         return _error_json("missing_table", f"required table missing: {', '.join(missing)}", 503)
 
-    # Keep leaderboard behavior consistent with standings/home_summary.
     if repo.leaderboard_candidate_count(season=season, min_pa=0, team=team) == 0:
-        fallback_season = repo.hitter_totals_fallback_season(requested_season)
-        if fallback_season:
-            season = fallback_season
-            mode = "PRESEASON_FALLBACK"
+        return JsonResponse(
+            {
+                "season": requested_season,
+                "requested_season": requested_season,
+                "effective_season": None,
+                "mode": "NO_DATA",
+                "metric": metric,
+                "requested_min_pa": 0,
+                "effective_min_pa": 0,
+                "min_pa_policy": "AUTO_BY_SEASON_PROGRESS",
+                "team": team or None,
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "rows": [],
+            }
+        )
 
     if min_pa_raw is None or str(min_pa_raw).strip() == "":
         requested_min_pa = _season_progress_min_pa(season, team)
@@ -276,8 +282,8 @@ def leaderboard(request):
             season=season,
             team=team,
             base_min_pa=requested_min_pa,
-            auto_relax=True,
-            min_count=5 if team else 20,
+            auto_relax=False,  # 규정타석 ON 상태 — 팀 필터 여부와 무관하게 완화하지 않음
+            min_count=20,
         )
     else:
         requested_min_pa = _parse_int(min_pa_raw, 100, min_value=0, max_value=700)
@@ -495,7 +501,8 @@ def player_detail(request, player_name: str):
 
 @require_GET
 def team_detail(request, team: str):
-    season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
+    requested_season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
+    season = requested_season
     name = team.strip()
     min_pa_raw = request.GET.get("min_pa")
 
@@ -519,6 +526,23 @@ def team_detail(request, team: str):
         min_pa_policy = "MANUAL"
 
     try:
+        if repo.leaderboard_candidate_count(season=season, min_pa=0, team=name) == 0:
+            return JsonResponse(
+                {
+                    "season": requested_season,
+                    "team": name,
+                    "mode": "NO_DATA",
+                    "detail": "아직 데이터가 없습니다.",
+                    "summary": {},
+                    "leaders": {"ops_top10": [], "hr_top10": []},
+                    "monthly_trend": [],
+                    "recent_games": [],
+                    "h2h": [],
+                    "latest_prediction_date": None,
+                    "latest_predictions": [],
+                }
+            )
+
         team_summary = repo.team_summary(season=season, team=name)
         if not team_summary or int(team_summary.get("players") or 0) == 0:
             return _error_json("team_not_found", f"team not found: {name}", 404, {"team": name, "season": season})
@@ -541,6 +565,7 @@ def team_detail(request, team: str):
                 row["BB_K"] = round(bb / so, 4) if so > 0 else None
 
             recent_games = repo.team_recent_games(team=name, season=season, limit=20)
+        h2h = repo.team_h2h_rows(team=name, season=season) if repo.table_exists("hitter_game_logs") else []
 
         latest_date = None
         latest_predictions: list[dict[str, Any]] = []
@@ -565,15 +590,66 @@ def team_detail(request, team: str):
                 "leaders": {"ops_top10": leaders_ops, "hr_top10": leaders_hr},
                 "monthly_trend": monthly,
                 "recent_games": recent_games,
+                "h2h": h2h,
                 "latest_prediction_date": latest_date,
                 "latest_predictions": latest_predictions,
                 "notes": [
-                    "team standings and win/loss require game result table (not present in current hitter-only DB)",
+                    "team recent games and head-to-head are derived from Naver-based hitter_game_logs",
                 ],
             }
         )
     except DatabaseError:
         return _error_json("database_error", "failed to load team detail", 500)
+
+
+@require_GET
+def team_schedule(request, team: str):
+    season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
+    limit = _parse_int(request.GET.get("limit"), 60, min_value=1, max_value=300)
+    name = team.strip()
+
+    try:
+        schedule_rows = repo.team_schedule_rows(team=name, season=season, limit=limit)
+        result_map = repo.team_result_by_game(team=name, season=season)
+        items: list[dict[str, Any]] = []
+        for row in schedule_rows:
+            game_id = str(row.get("game_id") or "").strip()
+            merged = {
+                "game_date": row.get("game_date"),
+                "game_id": game_id or None,
+                "away_team": row.get("away_team"),
+                "home_team": row.get("home_team"),
+                "game_time": row.get("game_time"),
+                "stadium": row.get("stadium"),
+                "status": row.get("status"),
+                "is_home": str(row.get("home_team") or "").strip() == name,
+                "opp_team": str(row.get("away_team") or "").strip()
+                if str(row.get("home_team") or "").strip() == name
+                else str(row.get("home_team") or "").strip(),
+                "result": None,
+                "team_score": None,
+                "opp_score": None,
+            }
+            if game_id and game_id in result_map:
+                src = result_map[game_id]
+                merged["result"] = src.get("result")
+                merged["team_score"] = src.get("team_score")
+                merged["opp_score"] = src.get("opp_score")
+                merged["opp_team"] = src.get("opp_team")
+            items.append(merged)
+
+        return JsonResponse(
+            {
+                "season": season,
+                "team": name,
+                "mode": "SEASON_MATCH" if len(items) > 0 else "NO_DATA",
+                "detail": None if len(items) > 0 else "아직 데이터가 없습니다.",
+                "rows": items,
+                "count": len(items),
+            }
+        )
+    except DatabaseError:
+        return _error_json("database_error", "failed to load team schedule", 500)
 
 
 @require_GET
