@@ -1,3 +1,4 @@
+from collections import defaultdict
 from typing import Any
 
 from django.db import connection
@@ -114,6 +115,133 @@ def standings_rows(season: int, as_of_date: str) -> list[dict[str, Any]]:
         """,
         (season, as_of_date),
     )
+
+
+def logs_latest_season_at_or_before(requested_season: int) -> int | None:
+    if not table_exists("hitter_game_logs"):
+        return None
+    row = query_one(
+        """
+        SELECT MAX(CAST(substr(game_date, 1, 4) AS INTEGER)) AS season
+        FROM hitter_game_logs
+        WHERE CAST(substr(game_date, 1, 4) AS INTEGER) <= %s
+        """,
+        (requested_season,),
+    )
+    value = (row or {}).get("season")
+    return int(value) if value else None
+
+
+def logs_latest_game_date(season: int) -> str | None:
+    if not table_exists("hitter_game_logs"):
+        return None
+    row = query_one(
+        "SELECT MAX(game_date) AS as_of_date FROM hitter_game_logs WHERE substr(game_date, 1, 4) = %s",
+        (str(season),),
+    )
+    return (row or {}).get("as_of_date")
+
+
+def _team_game_rows(season: int) -> list[dict[str, Any]]:
+    return query_all(
+        """
+        WITH team_scores AS (
+            SELECT
+                game_date,
+                game_id,
+                team,
+                COALESCE(SUM(R), 0) AS runs
+            FROM hitter_game_logs
+            WHERE substr(game_date, 1, 4) = %s
+            GROUP BY game_date, game_id, team
+        )
+        SELECT
+            a.game_date,
+            a.game_id,
+            a.team AS team,
+            b.team AS opp_team,
+            a.runs AS team_runs,
+            b.runs AS opp_runs,
+            CASE
+                WHEN a.runs > b.runs THEN 'W'
+                WHEN a.runs < b.runs THEN 'L'
+                ELSE 'D'
+            END AS result
+        FROM team_scores a
+        JOIN team_scores b ON a.game_id = b.game_id AND a.team <> b.team
+        ORDER BY a.game_date DESC, a.game_id DESC
+        """,
+        (str(season),),
+    )
+
+
+def computed_standings_rows(season: int) -> list[dict[str, Any]]:
+    rows = _team_game_rows(season)
+    by_team: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        team = str(row.get("team") or "").strip()
+        if not team:
+            continue
+        by_team[team].append(row)
+
+    standings: list[dict[str, Any]] = []
+    for team, games in by_team.items():
+        wins = sum(1 for g in games if g.get("result") == "W")
+        losses = sum(1 for g in games if g.get("result") == "L")
+        draws = sum(1 for g in games if g.get("result") == "D")
+        games_cnt = len(games)
+        pct = (wins / (wins + losses)) if (wins + losses) > 0 else 0.0
+
+        latest10 = games[:10]
+        r10_w = sum(1 for g in latest10 if g.get("result") == "W")
+        r10_l = sum(1 for g in latest10 if g.get("result") == "L")
+        r10_d = sum(1 for g in latest10 if g.get("result") == "D")
+        recent_10 = f"{r10_w}승{r10_d}무{r10_l}패"
+
+        streak_type = ""
+        streak_count = 0
+        for g in games:
+            result = str(g.get("result") or "")
+            if result not in {"W", "L"}:
+                continue
+            if not streak_type:
+                streak_type = result
+                streak_count = 1
+                continue
+            if result == streak_type:
+                streak_count += 1
+            else:
+                break
+        streak = f"{streak_count}{'연승' if streak_type == 'W' else '연패'}" if streak_type else "-"
+
+        standings.append(
+            {
+                "team": team,
+                "games": games_cnt,
+                "wins": wins,
+                "losses": losses,
+                "draws": draws,
+                "win_pct": round(pct, 3),
+                "recent_10": recent_10,
+                "streak": streak,
+                "home_record": None,
+                "away_record": None,
+            }
+        )
+
+    standings.sort(key=lambda r: (-float(r["win_pct"]), -int(r["wins"]), int(r["losses"]), str(r["team"])))
+    if not standings:
+        return []
+
+    leader_wins = int(standings[0]["wins"])
+    leader_losses = int(standings[0]["losses"])
+
+    for idx, row in enumerate(standings, start=1):
+        gb = ((leader_wins - int(row["wins"])) + (int(row["losses"]) - leader_losses)) / 2.0
+        row["rank"] = idx
+        row["gb"] = round(gb, 1)
+
+    return standings
 
 
 def home_base_totals(season: int) -> dict[str, Any]:
@@ -603,16 +731,129 @@ def team_monthly_rows(team: str, season: int, tb_expr: str) -> list[dict[str, An
 def team_recent_games(team: str, season: int, limit: int = 20) -> list[dict[str, Any]]:
     return query_all(
         """
-        SELECT game_date, game_id, COUNT(*) AS batter_rows
-        FROM hitter_game_logs
-        WHERE team = %s
-          AND substr(game_date, 1, 4) = %s
-        GROUP BY game_date, game_id
-        ORDER BY game_date DESC, game_id DESC
+        WITH team_scores AS (
+            SELECT
+                game_date,
+                game_id,
+                team,
+                COALESCE(SUM(R), 0) AS runs
+            FROM hitter_game_logs
+            WHERE substr(game_date, 1, 4) = %s
+            GROUP BY game_date, game_id, team
+        )
+        SELECT
+            a.game_date,
+            a.game_id,
+            b.team AS opp_team,
+            a.runs AS team_score,
+            b.runs AS opp_score,
+            CASE
+                WHEN a.runs > b.runs THEN 'W'
+                WHEN a.runs < b.runs THEN 'L'
+                ELSE 'D'
+            END AS result
+        FROM team_scores a
+        JOIN team_scores b ON a.game_id = b.game_id AND a.team <> b.team
+        WHERE a.team = %s
+        ORDER BY a.game_date DESC, a.game_id DESC
         LIMIT %s
         """,
-        (team, str(season), limit),
+        (str(season), team, limit),
     )
+
+
+def team_h2h_rows(team: str, season: int) -> list[dict[str, Any]]:
+    return query_all(
+        """
+        WITH team_scores AS (
+            SELECT
+                game_date,
+                game_id,
+                team,
+                COALESCE(SUM(R), 0) AS runs
+            FROM hitter_game_logs
+            WHERE substr(game_date, 1, 4) = %s
+            GROUP BY game_date, game_id, team
+        )
+        SELECT
+            b.team AS opp_team,
+            SUM(CASE WHEN a.runs > b.runs THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN a.runs < b.runs THEN 1 ELSE 0 END) AS losses,
+            SUM(CASE WHEN a.runs = b.runs THEN 1 ELSE 0 END) AS draws,
+            SUM(a.runs) AS runs_for,
+            SUM(b.runs) AS runs_against
+        FROM team_scores a
+        JOIN team_scores b ON a.game_id = b.game_id AND a.team <> b.team
+        WHERE a.team = %s
+        GROUP BY b.team
+        ORDER BY b.team ASC
+        """,
+        (str(season), team),
+    )
+
+
+def team_schedule_rows(team: str, season: int, limit: int = 60) -> list[dict[str, Any]]:
+    if not table_exists("team_schedule"):
+        return []
+    return query_all(
+        """
+        SELECT
+            game_date,
+            game_id,
+            away_team,
+            home_team,
+            game_time,
+            stadium,
+            status
+        FROM team_schedule
+        WHERE season = %s
+          AND (away_team = %s OR home_team = %s)
+        ORDER BY game_date DESC, game_time DESC, game_id DESC
+        LIMIT %s
+        """,
+        (season, team, team, limit),
+    )
+
+
+def team_result_by_game(team: str, season: int) -> dict[str, dict[str, Any]]:
+    if not table_exists("hitter_game_logs"):
+        return {}
+    rows = query_all(
+        """
+        WITH team_scores AS (
+            SELECT
+                game_date,
+                game_id,
+                team,
+                COALESCE(SUM(R), 0) AS runs
+            FROM hitter_game_logs
+            WHERE substr(game_date, 1, 4) = %s
+            GROUP BY game_date, game_id, team
+        )
+        SELECT
+            a.game_date,
+            a.game_id,
+            b.team AS opp_team,
+            a.runs AS team_score,
+            b.runs AS opp_score,
+            CASE
+                WHEN a.runs > b.runs THEN 'W'
+                WHEN a.runs < b.runs THEN 'L'
+                ELSE 'D'
+            END AS result
+        FROM team_scores a
+        JOIN team_scores b ON a.game_id = b.game_id AND a.team <> b.team
+        WHERE a.team = %s
+        """,
+        (str(season), team),
+    )
+    by_game: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        game_id = str(row.get("game_id") or "").strip()
+        if not game_id:
+            continue
+        by_game[game_id] = row
+    return by_game
 
 
 def team_latest_prediction_date(season: int, team: str) -> str | None:
