@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime
 from typing import Any
 
@@ -103,6 +104,50 @@ def _safe_ops_expr(sum_ab: str, sum_h: str, sum_bb: str, sum_hbp: str, sum_sf: s
 
 def _missing_required_tables(tables: list[str]) -> list[str]:
     return [table for table in tables if not repo.table_exists(table)]
+
+
+def _virtual_player_id(player_name: str) -> str:
+    normalized = str(player_name or "").strip()
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"p_{digest}"
+
+
+def _resolve_player_name_from_id(player_id: str, season: int) -> str | None:
+    pid = str(player_id or "").strip()
+    if not pid:
+        return None
+
+    statiz_name = repo.statiz_player_name_by_id(pid)
+    if statiz_name:
+        return statiz_name
+
+    for name in repo.player_distinct_names(season):
+        if _virtual_player_id(name) == pid:
+            return name
+
+    for name in repo.player_distinct_names(None):
+        if _virtual_player_id(name) == pid:
+            return name
+
+    return None
+
+
+def _preferred_player_id(player_name: str) -> str:
+    name = str(player_name or "").strip()
+    if not name:
+        return ""
+    statiz_id = repo.statiz_player_id_by_name(name)
+    if statiz_id:
+        return statiz_id
+    return _virtual_player_id(name)
+
+
+def _preferred_player_ids(names: list[str]) -> dict[str, str]:
+    mapping = {str(n).strip(): _virtual_player_id(str(n).strip()) for n in names if str(n).strip()}
+    statiz_map = repo.statiz_player_ids_by_names([n for n in mapping.keys()])
+    for name, pid in statiz_map.items():
+        mapping[name] = pid
+    return mapping
 
 
 @require_GET
@@ -311,6 +356,10 @@ def leaderboard(request):
             offset=offset,
             team=team,
         )
+        player_id_map = _preferred_player_ids([str(r.get("player_name") or "") for r in rows])
+        for row in rows:
+            name = str(row.get("player_name") or "").strip()
+            row["player_id"] = player_id_map.get(name, _virtual_player_id(name))
 
         return JsonResponse(
             {
@@ -366,15 +415,20 @@ def player_search(request):
 
     try:
         rows = repo.player_search_rows(season=season, q=q, limit=limit, team=team)
+        player_id_map = _preferred_player_ids([str(r.get("player_name") or "") for r in rows])
+        for row in rows:
+            name = str(row.get("player_name") or "").strip()
+            row["player_id"] = player_id_map.get(name, _virtual_player_id(name))
         return JsonResponse({"season": season, "q": q, "team": team or None, "rows": rows})
     except DatabaseError:
         return _error_json("database_error", "failed to search players", 500)
 
 
 @require_GET
-def player_detail(request, player_name: str):
+def player_detail(request, player_id: str):
     season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
-    name = player_name.strip()
+    pid = player_id.strip()
+    name = _resolve_player_name_from_id(pid, season) or pid
     recent_n = _parse_int(request.GET.get("recent_n"), 10, min_value=1, max_value=60)
 
     missing = _missing_required_tables(["hitter_season_totals"])
@@ -384,7 +438,12 @@ def player_detail(request, player_name: str):
     try:
         season_rows = repo.player_season_rows(name)
         if not season_rows:
-            return _error_json("player_not_found", f"player not found: {name}", 404, {"player_name": name})
+            return _error_json(
+                "player_not_found",
+                f"player not found: {name}",
+                404,
+                {"player_id": pid, "player_name": name},
+            )
 
         current_rows = [row for row in season_rows if int(row.get("season") or 0) == season]
 
@@ -476,8 +535,10 @@ def player_detail(request, player_name: str):
             {
                 "season": season,
                 "recent_n": recent_n,
+                "player_id": _preferred_player_id(name),
                 "player_name": name,
                 "profile": {
+                    "player_id": _preferred_player_id(name),
                     "player_name": name,
                     "teams_in_season": sorted({r["team"] for r in current_rows}) if current_rows else [],
                 },
