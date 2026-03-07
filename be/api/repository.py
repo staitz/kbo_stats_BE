@@ -475,10 +475,93 @@ def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[
     )
 
 
-def player_season_rows(player_name: str) -> list[dict[str, Any]]:
-    return query_all(
+def player_distinct_names(season: int | None = None) -> list[str]:
+    if season is None:
+        rows = query_all(
+            """
+            SELECT DISTINCT player_name
+            FROM hitter_season_totals
+            WHERE TRIM(player_name) <> ''
+            ORDER BY player_name ASC
+            """
+        )
+    else:
+        rows = query_all(
+            """
+            SELECT DISTINCT player_name
+            FROM hitter_season_totals
+            WHERE season = %s AND TRIM(player_name) <> ''
+            ORDER BY player_name ASC
+            """,
+            (season,),
+        )
+    return [str(r.get("player_name") or "").strip() for r in rows if str(r.get("player_name") or "").strip()]
+
+
+def statiz_player_name_by_id(player_id: str) -> str | None:
+    if not table_exists("statiz_players"):
+        return None
+    row = query_one(
         """
-        SELECT season, team, games, PA, AB, H, "2B", "3B", HR, RBI, BB, SO, HBP, SH, SF, SB, CS, GDP, AVG, OBP, SLG, OPS
+        SELECT player_name
+        FROM statiz_players
+        WHERE player_id = %s
+        LIMIT 1
+        """,
+        (player_id,),
+    )
+    name = str((row or {}).get("player_name") or "").strip()
+    return name or None
+
+
+def statiz_player_id_by_name(player_name: str) -> str | None:
+    if not table_exists("statiz_players"):
+        return None
+    row = query_one(
+        """
+        SELECT MIN(player_id) AS player_id
+        FROM statiz_players
+        WHERE player_name = %s
+        """,
+        (player_name,),
+    )
+    pid = str((row or {}).get("player_id") or "").strip()
+    return pid or None
+
+
+def statiz_player_ids_by_names(names: list[str]) -> dict[str, str]:
+    cleaned = [str(n).strip() for n in names if str(n).strip()]
+    if not cleaned or not table_exists("statiz_players"):
+        return {}
+
+    placeholders = ", ".join(["%s"] * len(cleaned))
+    rows = query_all(
+        f"""
+        SELECT player_name, MIN(player_id) AS player_id
+        FROM statiz_players
+        WHERE player_name IN ({placeholders})
+        GROUP BY player_name
+        """,
+        tuple(cleaned),
+    )
+    return {
+        str(r.get("player_name") or "").strip(): str(r.get("player_id") or "").strip()
+        for r in rows
+        if str(r.get("player_name") or "").strip() and str(r.get("player_id") or "").strip()
+    }
+
+
+def player_season_rows(player_name: str) -> list[dict[str, Any]]:
+    # WAR 컬럼이 있으면 그대로, 없으면 pseudo-WAR 근사치 계산
+    if table_has_column("hitter_season_totals", "WAR"):
+        war_expr = "WAR"
+    else:
+        war_expr = "ROUND(((OPS - 0.700) * PA) / 70.0, 2) AS WAR"
+
+    return query_all(
+        f"""
+        SELECT season, team, games, PA, AB, H, "2B", "3B", HR, RBI, BB, SO, HBP, SH, SF, SB, CS, GDP, AVG, OBP, SLG, OPS,
+               {war_expr}
         FROM hitter_season_totals
         WHERE player_name = %s
         ORDER BY season DESC, team ASC
