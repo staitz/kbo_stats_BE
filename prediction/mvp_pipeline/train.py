@@ -17,6 +17,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 from .config import AppConfig, get_config
 from .db import load_hitter_game_logs
 from .features import HitterFeatureBuilder, make_train_valid_test_split, prepare_model_matrix
+from .schema import MODEL_VERSION, SCHEMA_VERSION, build_schema
 
 
 TARGET_MAP = {
@@ -54,7 +55,13 @@ def train_hitter_targets(
 ) -> dict[str, dict]:
     cfg = config or get_config()
     builder = HitterFeatureBuilder(cfg)
-    sample_df = builder.build_training_samples(game_logs)
+
+    # Build training samples once; reuse the artifacts for feature_cols.
+    # This avoids calling build_daily_features() a second time.
+    train_result = builder.build_training_samples(game_logs, report=True)
+    sample_df = train_result.sample_df
+    artifacts = train_result.artifacts
+
     train_df, valid_df, test_df = make_train_valid_test_split(
         sample_df=sample_df,
         valid_start_date=cfg.data.valid_start_date,
@@ -64,9 +71,6 @@ def train_hitter_targets(
     output_path = Path(output_dir) if output_dir else cfg.model_dir
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Build features once — reuse the FeatureArtifacts from build_training_samples
-    # by also capturing feature_cols directly from the first call.
-    artifacts = builder.build_daily_features(game_logs)
     feature_cols = artifacts.feature_cols + list(cfg.hitter.categorical_cols)
     categorical_cols = list(cfg.hitter.categorical_cols)
     results: dict[str, dict] = {}
@@ -102,13 +106,39 @@ def train_hitter_targets(
             "n_test": int(len(test_df)),
         }
 
+    # Sampling config snapshot — recorded so every model checkpoint is reproducible.
+    sampling_config = {
+        "sampling_mode": cfg.data.sampling_mode,
+        "sample_every_n_games": cfg.data.sample_every_n_games,
+        "sample_game_checkpoints": list(cfg.data.sample_game_checkpoints),
+        "min_pa_threshold": cfg.data.min_pa_threshold,
+        "total_samples": int(len(sample_df)),
+    }
+
+    # Build and persist schema.json alongside the model files.
+    target_cols = list(TARGET_MAP.values())
+    schema = build_schema(
+        feature_cols=feature_cols,
+        categorical_cols=categorical_cols,
+        target_cols=target_cols,
+        training_season=int(game_logs["season"].max()) if "season" in game_logs.columns else 0,
+        sample_df=sample_df,
+        sampling_config=sampling_config,
+        model_version=MODEL_VERSION,
+    )
+    schema.save(output_path / "schema.json")
+
     meta = {
+        "schema_version": SCHEMA_VERSION,
+        "model_version": MODEL_VERSION,
+        "trained_at": schema.trained_at,
         "feature_cols": feature_cols,
         "categorical_cols": categorical_cols,
         "splits": {
             "valid_start_date": cfg.data.valid_start_date,
             "test_start_date": cfg.data.test_start_date,
         },
+        "sampling_config": sampling_config,
         "results": results,
     }
     meta_file = output_path / "hitter_training_meta.json"
@@ -121,12 +151,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=str, default=None, help="CSV, parquet, or sqlite DB path. If omitted, project DB is used.")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory for trained models.")
     parser.add_argument("--season", type=int, default=2025, help="Season to train from when reading sqlite.")
+    # Sampling policy overrides (each overrides the corresponding DataConfig default)
+    parser.add_argument(
+        "--sampling-mode",
+        choices=["interval", "checkpoints"],
+        default=None,
+        help="Sampling mode: 'interval' (every N games) or 'checkpoints' (fixed game milestones). Overrides config.",
+    )
+    parser.add_argument(
+        "--sample-every-n-games",
+        type=int,
+        default=None,
+        help="(interval mode) Sample one snapshot every N games per player. Overrides config value.",
+    )
+    parser.add_argument(
+        "--min-pa-threshold",
+        type=int,
+        default=None,
+        help="Minimum PA_cum for a row to be included in training samples. Overrides config value.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     cfg = get_config()
+    # Apply CLI overrides to sampling policy
+    if args.sampling_mode is not None:
+        cfg.data.sampling_mode = args.sampling_mode
+    if args.sample_every_n_games is not None:
+        cfg.data.sample_every_n_games = args.sample_every_n_games
+    if args.min_pa_threshold is not None:
+        cfg.data.min_pa_threshold = args.min_pa_threshold
+
     game_logs = load_hitter_game_logs(args.input, args.season)
     meta = train_hitter_targets(game_logs, cfg, args.output_dir)
     print(json.dumps(meta, ensure_ascii=False, indent=2))
