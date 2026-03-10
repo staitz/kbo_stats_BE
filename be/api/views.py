@@ -385,16 +385,22 @@ def leaderboard(request):
 @require_GET
 def predictions_latest(request):
     season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
+    # mode: 'prediction' (default, daily in-season) or 'projection' (pre-season)
+    mode = str(request.GET.get("mode", "prediction")).strip().lower()
+    if mode not in {"prediction", "projection"}:
+        mode = "prediction"
+    # model_version: optional filter e.g. 'hitter_mvp_v2'. None = no filter (latest across all versions)
+    model_version: str | None = request.GET.get("model_version") or None
 
     if not repo.table_exists("hitter_predictions"):
-        return JsonResponse({"season": season, "latest_date": None, "rows": []})
+        return JsonResponse({"season": season, "mode": mode, "model_version": model_version, "latest_date": None, "rows": []})
 
     try:
-        latest_date = repo.predictions_latest_date(season)
+        latest_date = repo.predictions_latest_date(season, mode=mode, model_version=model_version)
         if not latest_date:
-            return JsonResponse({"season": season, "latest_date": None, "rows": []})
-        rows = repo.predictions_latest_rows(season=season, latest_date=latest_date, limit=100)
-        return JsonResponse({"season": season, "latest_date": latest_date, "rows": rows})
+            return JsonResponse({"season": season, "mode": mode, "model_version": model_version, "latest_date": None, "rows": []})
+        rows = repo.predictions_latest_rows(season=season, latest_date=latest_date, limit=100, mode=mode, model_version=model_version)
+        return JsonResponse({"season": season, "mode": mode, "model_version": model_version, "latest_date": latest_date, "rows": rows})
     except DatabaseError:
         return _error_json("database_error", "failed to load predictions", 500)
 
