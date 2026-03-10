@@ -431,30 +431,77 @@ def leaderboard_rows(
     )
 
 
-def predictions_latest_date(season: int) -> str | None:
-    rows = query_all(
-        """
-        SELECT MAX(as_of_date) AS latest_date
-        FROM hitter_predictions
-        WHERE season = %s
-        """,
-        (season,),
-    )
+def predictions_latest_date(season: int, mode: str = "prediction", model_version: str | None = None) -> str | None:
+    """Return the most recent as_of_date for the given season, prediction mode, and model version.
+
+    Args:
+        season:        Season year.
+        mode:          ``'prediction'`` (default) or ``'projection'``.
+        model_version: If given, restrict to this model_version (e.g. ``'hitter_mvp_v2'``).
+                       ``None`` (default) matches any version.
+    """
+    # Build optional model_version filter
+    version_clause = " AND model_version = %s" if model_version else ""
+    version_params = (model_version,) if model_version else ()
+    try:
+        rows = query_all(
+            f"""
+            SELECT MAX(as_of_date) AS latest_date
+            FROM hitter_predictions
+            WHERE season = %s AND prediction_mode = %s{version_clause}
+            """,
+            (season, mode) + version_params,
+        )
+    except Exception:  # noqa: BLE001  — column may not exist in older DBs
+        rows = query_all(
+            """
+            SELECT MAX(as_of_date) AS latest_date
+            FROM hitter_predictions
+            WHERE season = %s
+            """,
+            (season,),
+        )
     return rows[0]["latest_date"] if rows else None
 
 
-def predictions_latest_rows(season: int, latest_date: str, limit: int = 100) -> list[dict[str, Any]]:
-    return query_all(
-        """
-        SELECT team, player_name, predicted_hr_final, predicted_ops_final,
-               confidence_level, confidence_score, pa_to_date, blend_weight, model_source
-        FROM hitter_predictions
-        WHERE season = %s AND as_of_date = %s
-        ORDER BY predicted_ops_final DESC
-        LIMIT %s
-        """,
-        (season, latest_date, limit),
-    )
+def predictions_latest_rows(
+    season: int,
+    latest_date: str,
+    limit: int = 100,
+    mode: str = "prediction",
+    model_version: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch hitter prediction rows for the given season, as_of_date, mode, and model version.
+
+    Falls back to unfiltered query if the prediction_mode/model_version column is missing.
+    """
+    version_clause = " AND model_version = %s" if model_version else ""
+    version_params = (model_version,) if model_version else ()
+    try:
+        return query_all(
+            f"""
+            SELECT team, player_name, predicted_hr_final, predicted_ops_final, predicted_war_final,
+                   confidence_level, confidence_score, pa_to_date, blend_weight, model_source,
+                   prediction_mode, model_version, model_season
+            FROM hitter_predictions
+            WHERE season = %s AND as_of_date = %s AND prediction_mode = %s{version_clause}
+            ORDER BY predicted_ops_final DESC
+            LIMIT %s
+            """,
+            (season, latest_date, mode) + version_params + (limit,),
+        )
+    except Exception:  # noqa: BLE001
+        return query_all(
+            """
+            SELECT team, player_name, predicted_hr_final, predicted_ops_final, predicted_war_final,
+                   confidence_level, confidence_score, pa_to_date, blend_weight, model_source
+            FROM hitter_predictions
+            WHERE season = %s AND as_of_date = %s
+            ORDER BY predicted_ops_final DESC
+            LIMIT %s
+            """,
+            (season, latest_date, limit),
+        )
 
 
 def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[dict[str, Any]]:
@@ -573,7 +620,7 @@ def player_season_rows(player_name: str) -> list[dict[str, Any]]:
 def player_latest_prediction(season: int, player_name: str) -> dict[str, Any] | None:
     return query_one(
         """
-        SELECT season, as_of_date, team, predicted_hr_final, predicted_ops_final,
+        SELECT season, as_of_date, team, predicted_hr_final, predicted_ops_final, predicted_war_final,
                confidence_level, confidence_score, model_source
         FROM hitter_predictions
         WHERE season = %s AND player_name = %s
@@ -950,7 +997,8 @@ def team_latest_prediction_date(season: int, team: str) -> str | None:
 def team_latest_predictions(season: int, team: str, latest_date: str, limit: int = 10) -> list[dict[str, Any]]:
     return query_all(
         """
-        SELECT player_name, predicted_hr_final, predicted_ops_final, confidence_level, blend_weight, model_source
+        SELECT player_name, predicted_hr_final, predicted_ops_final, predicted_war_final,
+               confidence_level, blend_weight, model_source
         FROM hitter_predictions
         WHERE season = %s AND team = %s AND as_of_date = %s
         ORDER BY predicted_ops_final DESC
