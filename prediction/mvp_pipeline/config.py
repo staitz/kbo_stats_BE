@@ -17,8 +17,16 @@ class DataConfig:
     team_col: str = "team"
     season_col: str = "season"
     age_col: str = "age"
-    min_pa_threshold: int = 20
+    # ---------------------------------------------------------------------------
+    # Sampling policy (used by HitterFeatureBuilder.build_training_samples)
+    # ---------------------------------------------------------------------------
+    # sampling_mode = "interval"     : sample every sample_every_n_games games
+    #               = "checkpoints"  : sample only at sample_game_checkpoints game milestones
+    sampling_mode: str = "interval"
     sample_every_n_games: int = 5
+    sample_game_checkpoints: tuple[int, ...] = (20, 40, 60, 80, 100, 120)
+    min_pa_threshold: int = 20
+    # ---------------------------------------------------------------------------
     valid_start_date: str = "2025-08-01"
     test_start_date: str = "2025-09-01"
 
