@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -37,6 +38,46 @@ class FeatureArtifacts:
     feature_df: pd.DataFrame
     feature_cols: list[str]
     categorical_cols: list[str]
+
+
+@dataclass(slots=True)
+class TrainingSampleResult:
+    """Returned by HitterFeatureBuilder.build_training_samples().
+
+    Attributes:
+        sample_df:  The sampled training DataFrame (one row per player-game snapshot).
+        artifacts:  FeatureArtifacts from the underlying build_daily_features() call,
+                    so callers can reuse ``feature_cols`` without a second build.
+    """
+    sample_df: pd.DataFrame
+    artifacts: FeatureArtifacts
+
+
+# ---------------------------------------------------------------------------
+# Sample report helper
+# ---------------------------------------------------------------------------
+
+def _print_sample_report(samples: pd.DataFrame, mode: str, n_games: int, min_pa: int) -> None:
+    """Print a sampling statistics report to stdout."""
+    total = len(samples)
+    print(f"[sampling] mode={mode}  n_games={n_games}  min_pa={min_pa}", file=sys.stderr)
+    print(f"[sampling] total_samples={total}", file=sys.stderr)
+
+    if "season" in samples.columns:
+        print("[sampling] season_distribution:", file=sys.stderr)
+        for season, cnt in samples.groupby("season").size().items():
+            print(f"  {season}: {cnt} samples", file=sys.stderr)
+
+    if "game_no" in samples.columns:
+        bins = list(range(0, int(samples["game_no"].max()) + 21, 20))
+        labels = [f"{bins[i]+1}-{bins[i+1]}" for i in range(len(bins) - 1)]
+        cuts = pd.cut(samples["game_no"], bins=bins, labels=labels, right=True)
+        dist = cuts.value_counts().sort_index()
+        print("[sampling] game_no_distribution:", file=sys.stderr)
+        for bracket, cnt in dist.items():
+            if cnt > 0:
+                print(f"  games [{bracket}]: {cnt} samples", file=sys.stderr)
+
 
 
 class HitterFeatureBuilder:
@@ -215,10 +256,51 @@ class HitterFeatureBuilder:
             categorical_cols=list(self.config.hitter.categorical_cols),
         )
 
-    def build_training_samples(self, game_logs: pd.DataFrame) -> pd.DataFrame:
+    def build_training_samples(
+        self,
+        game_logs: pd.DataFrame,
+        report: bool = True,
+    ) -> TrainingSampleResult:
+        """Build training samples from raw game logs using the configured sampling policy.
+
+        Sampling policy (controlled via ``AppConfig.data``):
+
+        * ``sampling_mode = "interval"`` (default): one snapshot every
+          ``sample_every_n_games`` games for each player.
+        * ``sampling_mode = "checkpoints"``: snapshots only at the game counts
+          listed in ``sample_game_checkpoints`` (e.g. 20, 40, 60, …).
+
+        In both modes, rows where ``PA_cum < min_pa_threshold`` are excluded.
+
+        Args:
+            game_logs:  Raw hitter game log DataFrame.
+            report:     If *True*, print a sampling statistics report to stderr.
+
+        Returns:
+            :class:`TrainingSampleResult` with ``sample_df`` (the sampled rows)
+            and ``artifacts`` (the :class:`FeatureArtifacts` produced by
+            :meth:`build_daily_features`, reusable by the caller to avoid a
+            redundant second build).
+        """
         artifacts = self.build_daily_features(game_logs)
         df = artifacts.feature_df.copy()
 
+        cfg = self.config.data
+        mode = cfg.sampling_mode
+        min_pa = cfg.min_pa_threshold
+
+        # ── PA gate (applied in both modes) ───────────────────────────────────
+        pa_mask = df["PA_cum"] >= min_pa
+
+        if mode == "checkpoints":
+            checkpoints = set(cfg.sample_game_checkpoints)
+            sample_mask = pa_mask & df["game_no"].isin(checkpoints)
+        else:
+            # Default: "interval"
+            n = cfg.sample_every_n_games
+            sample_mask = pa_mask & ((df["game_no"] % n) == 0)
+
+        # ── Final-season stats for labels ─────────────────────────────────────
         final_df = (
             df.groupby("player_key", as_index=False)
             .agg(
@@ -231,17 +313,23 @@ class HitterFeatureBuilder:
             )
         )
 
-        samples = df.merge(final_df, on=["player_key", "team", "player_name"], how="left")
-        samples["sample_flag"] = (
-            (samples["PA_cum"] >= self.config.data.min_pa_threshold)
-            & ((samples["game_no"] % self.config.data.sample_every_n_games) == 0)
-        )
-        samples = samples.loc[samples["sample_flag"]].copy()
+        samples = df.loc[sample_mask].copy()
+        samples = samples.merge(final_df, on=["player_key", "team", "player_name"], how="left")
         samples["sample_date"] = samples["game_date"].dt.strftime("%Y-%m-%d")
         samples["OPS_ros"] = samples["OPS_final"] - samples["OPS_to_date"]
         samples["HR_ros"] = samples["HR_final"] - samples["HR_cum"]
         samples["WAR_ros"] = samples["WAR_final"] - samples["WAR_to_date"]
-        return optimize_numeric_dtypes(samples)
+        samples = optimize_numeric_dtypes(samples)
+
+        if report:
+            _print_sample_report(
+                samples,
+                mode=mode,
+                n_games=cfg.sample_every_n_games,
+                min_pa=min_pa,
+            )
+
+        return TrainingSampleResult(sample_df=samples, artifacts=artifacts)
 
 
 class PitcherFeatureBuilder:
