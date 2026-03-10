@@ -9,3 +9,14 @@ kbo_stats.db
 models/
 failed_dates.txt
 *.log
+
+# Generated ML artifacts
+prediction/mvp_pipeline/artifacts/models/
+prediction/mvp_pipeline/artifacts/predictions/
+
+# Validation reports (keep baseline json tracked)
+artifacts/validation/*_backtest_report.json
+
+# SQLite runtime files
+kbo_stats.db-wal
+kbo_stats.db-shm
