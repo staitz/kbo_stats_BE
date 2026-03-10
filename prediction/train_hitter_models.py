@@ -1,3 +1,21 @@
+# =============================================================================
+# DEPRECATED — 이 스크립트는 legacy XGBoost/sklearn 학습 파이프라인입니다.
+# 현재 운영 파이프라인(mvp_pipeline / LightGBM)에서 호출되지 않습니다.
+#
+# 운영 학습은 아래 명령을 사용하세요:
+#   python -m prediction.mvp_pipeline.train --season YYYY
+#
+# 이 파일은 참조 목적으로만 보존됩니다. 직접 실행하지 마세요.
+# =============================================================================
+raise SystemExit(
+    "[DEPRECATED] prediction.train_hitter_models is no longer part of the "
+    "active prediction pipeline.\n"
+    "Hitter model training now uses LightGBM via:\n"
+    "  python -m prediction.mvp_pipeline.train --season YYYY\n"
+    "or run the weekly schedule script:\n"
+    "  .\\scripts\\run_weekly_train.ps1"
+)
+
 import argparse
 import json
 import os
