@@ -1,3 +1,22 @@
+# =============================================================================
+# DEPRECATED — 이 스크립트는 legacy hitter 예측 스크립트입니다.
+# 현재 운영 파이프라인(mvp_pipeline)에서 호출되지 않습니다.
+#
+# 운영 예측은 아래 명령을 사용하세요:
+#   python -m prediction.mvp_pipeline.run_daily_mvp --season YYYY --as-of-date YYYY-MM-DD
+#
+# 이 파일은 참조 목적으로만 보존됩니다. 직접 실행하지 마세요.
+# =============================================================================
+raise SystemExit(
+    "[DEPRECATED] prediction.predict_hitter_ml is no longer part of the "
+    "active prediction pipeline.\n"
+    "Daily hitter predictions now use:\n"
+    "  python -m prediction.mvp_pipeline.run_daily_mvp "
+    "--season YYYY --as-of-date YYYY-MM-DD\n"
+    "or run the daily schedule script:\n"
+    "  .\\scripts\\run_daily_mvp.ps1"
+)
+
 import argparse
 import json
 import os
