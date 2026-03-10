@@ -1,15 +1,32 @@
 $ErrorActionPreference = 'Stop'
-Set-Location (Split-Path -Parent $MyInvocation.MyCommand.Path)\..
+Set-Location (Split-Path -Parent $MyInvocation.MyCommand.Path)\..\
 
-# Rebuild training rows for previous season (KST year-1 default)
-python -m prediction.build_hitter_training_set --db kbo_stats.db --upsert
-
-# Compute val_after as 80% time split based on KST year-1
-$valAfter = python -c "from datetime import datetime; from zoneinfo import ZoneInfo; import sqlite3; season = datetime.now(ZoneInfo('Asia/Seoul')).year - 1; conn=sqlite3.connect('kbo_stats.db'); cur=conn.cursor(); cur.execute(\"SELECT DISTINCT as_of_date FROM hitter_training_rows WHERE train_season = ? ORDER BY as_of_date\", (season,)); dates=[r[0] for r in cur.fetchall()]; conn.close(); idx=max(int(len(dates)*0.8)-1,0) if dates else -1; print(dates[idx] if dates else '')"
-
-if ([string]::IsNullOrWhiteSpace($valAfter)) {
-  Write-Host '[warn] No training rows; skipping model training'
-  exit 1
+function Assert-LastExit([string]$step) {
+  if ($LASTEXITCODE -ne 0) {
+    throw "$step failed with exit code $LASTEXITCODE"
+  }
 }
 
-python -m prediction.train_hitter_models --db kbo_stats.db --model-dir models --val-after $valAfter
+# Resolve train season: use KST current year (in-season training)
+# or override with $env:KBO_TRAIN_SEASON if set.
+$trainSeason = if ($env:KBO_TRAIN_SEASON) {
+  $env:KBO_TRAIN_SEASON
+} else {
+  (
+  @'
+from datetime import datetime
+from zoneinfo import ZoneInfo
+print(datetime.now(ZoneInfo("Asia/Seoul")).year)
+'@ | python -
+  ).Trim()
+}
+Assert-LastExit "resolve train season"
+
+Write-Host "Training mvp_pipeline hitter models for season=$trainSeason ..."
+
+# Train hitter models: OPS + HR + WAR (LightGBM)
+# Reads directly from hitter_game_logs — no snapshot prep needed.
+python -m prediction.mvp_pipeline.train --season $trainSeason
+Assert-LastExit "prediction.mvp_pipeline.train"
+
+Write-Host "Weekly training completed for season=$trainSeason"
