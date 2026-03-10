@@ -39,7 +39,7 @@ print(datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d"))
 ).Trim()
 Assert-LastExit "resolve as-of date"
 
-python -m prediction.mvp_pipeline.run_daily_mvp --season $season --as-of-date $asOfDate --replace-existing
+python -m prediction.mvp_pipeline.run_daily_mvp --season $season --as-of-date $asOfDate --mode prediction --replace-existing
 Assert-LastExit "prediction.mvp_pipeline.run_daily_mvp"
 
 Write-Host "Daily MVP pipeline completed for season=$season as_of_date=$asOfDate"
