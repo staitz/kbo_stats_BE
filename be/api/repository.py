@@ -598,52 +598,111 @@ def statiz_player_ids_by_names(names: list[str]) -> dict[str, str]:
     }
 
 
-def player_season_rows(player_name: str) -> list[dict[str, Any]]:
+def player_season_rows(player_name: str, team: str | None = None) -> list[dict[str, Any]]:
     # WAR 컬럼이 있으면 그대로, 없으면 pseudo-WAR 근사치 계산
     if table_has_column("hitter_season_totals", "WAR"):
         war_expr = "WAR"
     else:
         war_expr = "ROUND(((OPS - 0.700) * PA) / 70.0, 2) AS WAR"
 
+    where = ["player_name = %s"]
+    params: list[Any] = [player_name]
+    if team:
+        where.append("team = %s")
+        params.append(team)
+
     return query_all(
         f"""
         SELECT season, team, games, PA, AB, H, "2B", "3B", HR, RBI, BB, SO, HBP, SH, SF, SB, CS, GDP, AVG, OBP, SLG, OPS,
                {war_expr}
         FROM hitter_season_totals
-        WHERE player_name = %s
+        WHERE {' AND '.join(where)}
         ORDER BY season DESC, team ASC
         """,
-        (player_name,),
+        tuple(params),
     )
 
 
-def player_latest_prediction(season: int, player_name: str) -> dict[str, Any] | None:
-    return query_one(
-        """
-        SELECT season, as_of_date, team, predicted_hr_final, predicted_ops_final, predicted_war_final,
-               confidence_level, confidence_score, model_source
-        FROM hitter_predictions
-        WHERE season = %s AND player_name = %s
-        ORDER BY as_of_date DESC
-        LIMIT 1
-        """,
-        (season, player_name),
-    )
+def player_latest_prediction(season: int, player_name: str, team: str | None = None) -> dict[str, Any] | None:
+    where = ["season = %s", "player_name = %s"]
+    params: list[Any] = [season, player_name]
+    if team:
+        where.append("team = %s")
+        params.append(team)
+    where_sql = " AND ".join(where)
+
+    try:
+        return query_one(
+            f"""
+            SELECT season, as_of_date, team, predicted_hr_final, predicted_ops_final, predicted_war_final,
+                   confidence_level, confidence_score, model_source, pa_to_date
+            FROM hitter_predictions
+            WHERE {where_sql}
+            ORDER BY as_of_date DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        )
+    except Exception:  # noqa: BLE001
+        return query_one(
+            f"""
+            SELECT season, as_of_date, team, predicted_hr_final, predicted_ops_final, predicted_war_final,
+                   confidence_level, confidence_score, model_source
+            FROM hitter_predictions
+            WHERE {where_sql}
+            ORDER BY as_of_date DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        )
 
 
-def player_trend_rows(season: int, player_name: str) -> list[dict[str, Any]]:
+def prediction_rows_for_as_of(season: int, as_of_date: str) -> list[dict[str, Any]]:
+    try:
+        return query_all(
+            """
+            SELECT team, player_name, predicted_ops_final, predicted_war_final, pa_to_date
+            FROM hitter_predictions
+            WHERE season = %s AND as_of_date = %s
+            """,
+            (season, as_of_date),
+        )
+    except Exception:  # noqa: BLE001
+        return query_all(
+            """
+            SELECT team, player_name, predicted_ops_final, 0.0 AS predicted_war_final, 0.0 AS pa_to_date
+            FROM hitter_predictions
+            WHERE season = %s AND as_of_date = %s
+            """,
+            (season, as_of_date),
+        )
+
+
+def player_trend_rows(season: int, player_name: str, team: str | None = None) -> list[dict[str, Any]]:
+    where = ["season = %s", "player_name = %s"]
+    params: list[Any] = [season, player_name]
+    if team:
+        where.append("team = %s")
+        params.append(team)
+
     return query_all(
-        """
+        f"""
         SELECT as_of_date, team, PA, HR, OPS, OPS_7, OPS_14
         FROM hitter_daily_snapshots
-        WHERE season = %s AND player_name = %s
+        WHERE {' AND '.join(where)}
         ORDER BY as_of_date ASC, team ASC
         """,
-        (season, player_name),
+        tuple(params),
     )
 
 
-def player_monthly_rows(player_name: str, season: int, tb_expr: str) -> list[dict[str, Any]]:
+def player_monthly_rows(player_name: str, season: int, tb_expr: str, team: str | None = None) -> list[dict[str, Any]]:
+    where = ["player_name = %s", "substr(game_date, 1, 4) = %s"]
+    params: list[Any] = [player_name, str(season)]
+    if team:
+        where.append("team = %s")
+        params.append(team)
+
     return query_all(
         f"""
         SELECT
@@ -660,16 +719,21 @@ def player_monthly_rows(player_name: str, season: int, tb_expr: str) -> list[dic
             COALESCE(SUM(SF), 0) AS SF,
             COALESCE(SUM({tb_expr}), 0) AS TB_adj
         FROM hitter_game_logs
-        WHERE player_name = %s
-          AND substr(game_date, 1, 4) = %s
+        WHERE {' AND '.join(where)}
         GROUP BY substr(game_date, 1, 6), team
         ORDER BY month ASC, team ASC
         """,
-        (player_name, str(season)),
+        tuple(params),
     )
 
 
-def player_vs_team_rows(player_name: str, season: int, tb_expr: str) -> list[dict[str, Any]]:
+def player_vs_team_rows(player_name: str, season: int, tb_expr: str, team: str | None = None) -> list[dict[str, Any]]:
+    where = ["g1.player_name = %s", "substr(g1.game_date, 1, 4) = %s"]
+    params: list[Any] = [player_name, str(season)]
+    if team:
+        where.append("g1.team = %s")
+        params.append(team)
+
     return query_all(
         f"""
         SELECT
@@ -703,25 +767,34 @@ def player_vs_team_rows(player_name: str, season: int, tb_expr: str) -> list[dic
                     WHERE g2.game_id = g1.game_id AND g2.team <> g1.team
                 ) AS opp_team
             FROM hitter_game_logs g1
-            WHERE g1.player_name = %s
-              AND substr(g1.game_date, 1, 4) = %s
+            WHERE {' AND '.join(where)}
         ) x
         WHERE opp_team IS NOT NULL
         GROUP BY team, opp_team
         ORDER BY PA DESC, opp_team ASC
         """,
-        (player_name, str(season)),
+        tuple(params),
     )
 
 
-def player_recent_games_rows(player_name: str, season: int, recent_n: int) -> list[dict[str, Any]]:
+def player_recent_games_rows(player_name: str, season: int, recent_n: int, team: str | None = None) -> list[dict[str, Any]]:
+    where_p = ["player_name = %s", "substr(game_date, 1, 4) = %s"]
+    params_p: list[Any] = [player_name, str(season)]
+    where_g = ["g.player_name = %s"]
+    params_g: list[Any] = [player_name]
+    
+    if team:
+        where_p.append("team = %s")
+        params_p.append(team)
+        where_g.append("g.team = %s")
+        params_g.append(team)
+
     return query_all(
-        """
+        f"""
         WITH player_games AS (
             SELECT DISTINCT game_id, game_date
             FROM hitter_game_logs
-            WHERE player_name = %s
-              AND substr(game_date, 1, 4) = %s
+            WHERE {' AND '.join(where_p)}
             ORDER BY game_date DESC, game_id DESC
             LIMIT %s
         )
@@ -738,15 +811,21 @@ def player_recent_games_rows(player_name: str, season: int, recent_n: int) -> li
             COALESCE(SUM(g.TB), 0) AS TB
         FROM hitter_game_logs g
         JOIN player_games p ON p.game_id = g.game_id AND p.game_date = g.game_date
-        WHERE g.player_name = %s
+        WHERE {' AND '.join(where_g)}
         GROUP BY g.game_date, g.game_id, g.team
         ORDER BY g.game_date DESC, g.game_id DESC
         """,
-        (player_name, str(season), recent_n, player_name),
+        tuple(params_p + [recent_n] + params_g),
     )
 
 
-def player_current_aggregate(season: int, player_name: str, ops_expr: str) -> dict[str, Any] | None:
+def player_current_aggregate(season: int, player_name: str, ops_expr: str, team: str | None = None) -> dict[str, Any] | None:
+    where = ["season = %s", "player_name = %s"]
+    params: list[Any] = [season, player_name]
+    if team:
+        where.append("team = %s")
+        params.append(team)
+
     return query_one(
         f"""
         SELECT
@@ -769,21 +848,26 @@ def player_current_aggregate(season: int, player_name: str, ops_expr: str) -> di
             COALESCE(SUM(GDP), 0) AS GDP,
             {ops_expr} AS OPS
         FROM hitter_season_totals
-        WHERE season = %s AND player_name = %s
+        WHERE {' AND '.join(where)}
         """,
-        (season, player_name),
+        tuple(params),
     )
 
 
-def player_kbreport_split_rows(season: int, player_name: str) -> list[dict[str, Any]]:
+def player_kbreport_split_rows(season: int, player_name: str, team: str | None = None) -> list[dict[str, Any]]:
+    # kbreport splits don't always have team filtering easily available in the same table,
+    # but we can try if the column exists in that particular table.
+    # Currently assuming it might not have team or we can optionally query it.
+    where = ["season = %s", "player_name = %s"]
+    params: list[Any] = [season, player_name]
     return query_all(
-        """
+        f"""
         SELECT split_group, split_key, split_label, PA, AB, H, HR, BB, SO, AVG, OBP, SLG, OPS
         FROM kbreport_hitter_splits
-        WHERE season = %s AND player_name = %s
+        WHERE {' AND '.join(where)}
         ORDER BY split_group ASC, split_key ASC
         """,
-        (season, player_name),
+        tuple(params),
     )
 
 
