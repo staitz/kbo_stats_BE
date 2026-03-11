@@ -90,6 +90,7 @@ class ApiEndpointsTest(TestCase):
                     player_name TEXT NOT NULL,
                     predicted_hr_final REAL NOT NULL DEFAULT 0,
                     predicted_ops_final REAL NOT NULL DEFAULT 0,
+                    predicted_war_final REAL NOT NULL DEFAULT 0,
                     confidence_level TEXT NOT NULL DEFAULT 'LOW',
                     confidence_score REAL NOT NULL DEFAULT 0,
                     model_season INTEGER NOT NULL DEFAULT 0,
@@ -240,6 +241,11 @@ class ApiEndpointsTest(TestCase):
         self.assertIn("vs_team_splits", data)
         self.assertIn("recent_game_logs", data)
         self.assertIn("kbreport_splits", data)
+        self.assertIn("latest_prediction", data)
+        self.assertIn("predicted_hits_final", data["latest_prediction"])
+        self.assertIn("predicted_rbi_final", data["latest_prediction"])
+        self.assertIn("golden_glove_probability", data["latest_prediction"])
+        self.assertIn("mvp_probability", data["latest_prediction"])
 
     def test_player_detail_recent_n(self):
         res = self.client.get("/api/players/홍길동?season=2025&recent_n=1")
