@@ -44,6 +44,72 @@ def _parse_yyyymmdd(value: str) -> datetime | None:
         return None
 
 
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _estimate_hitter_projection(
+    latest_prediction: dict[str, Any] | None,
+    current_agg: dict[str, Any] | None,
+    season: int,
+) -> dict[str, Any] | None:
+    if not latest_prediction or not current_agg:
+        return latest_prediction
+
+    enriched = dict(latest_prediction)
+    team = str(enriched.get("team") or "").strip()
+    team_games = repo.max_team_games(season, team) if team else 0
+    season_games = 144
+    pace_factor = float(season_games) / float(team_games) if team_games > 0 else 1.0
+    pace_factor = _clamp(pace_factor, 1.0, 2.5)
+
+    hits_to_date = float(current_agg.get("H") or 0)
+    rbi_to_date = float(current_agg.get("RBI") or 0)
+    enriched["predicted_hits_final"] = round(hits_to_date * pace_factor)
+    enriched["predicted_rbi_final"] = round(rbi_to_date * pace_factor)
+
+    as_of_date = str(enriched.get("as_of_date") or "").strip()
+    if not as_of_date:
+        return enriched
+
+    comparison_rows = repo.prediction_rows_for_as_of(season=season, as_of_date=as_of_date)
+    qualified = [row for row in comparison_rows if float(row.get("pa_to_date") or 0) >= 80]
+    if not qualified:
+        qualified = comparison_rows
+    if not qualified:
+        return enriched
+
+    qualified.sort(
+        key=lambda row: (
+            -float(row.get("predicted_war_final") or 0),
+            -float(row.get("predicted_ops_final") or 0),
+            str(row.get("player_name") or ""),
+        )
+    )
+
+    total = len(qualified)
+    player_name = str(enriched.get("player_name") or "").strip()
+    player_row = next((row for row in qualified if str(row.get("player_name") or "").strip() == player_name), None)
+    if not player_row:
+        return enriched
+
+    rank = next(
+        (index for index, row in enumerate(qualified, start=1) if str(row.get("player_name") or "").strip() == player_name),
+        total,
+    )
+    percentile = 1.0 - ((rank - 1) / max(total, 1))
+    leader_war = float(qualified[0].get("predicted_war_final") or 0)
+    player_war = float(player_row.get("predicted_war_final") or 0)
+    war_ratio = player_war / leader_war if leader_war > 0 else 0.0
+
+    mvp_prob = ((percentile ** 2.6) * 0.42) + (max(0.0, war_ratio - 0.7) * 0.30)
+    gg_prob = (percentile * 0.72) + (max(0.0, war_ratio - 0.55) * 0.25)
+
+    enriched["mvp_probability"] = round(_clamp(mvp_prob, 0.01, 0.65), 4)
+    enriched["golden_glove_probability"] = round(_clamp(gg_prob, 0.05, 0.92), 4)
+    return enriched
+
+
 def _season_progress_min_pa(season: int, team: str = "") -> int:
     max_games = repo.max_team_games(season, team)
     return int(max_games * 3.1)
@@ -421,10 +487,10 @@ def player_search(request):
 
     try:
         rows = repo.player_search_rows(season=season, q=q, limit=limit, team=team)
-        player_id_map = _preferred_player_ids([str(r.get("player_name") or "") for r in rows])
         for row in rows:
             name = str(row.get("player_name") or "").strip()
-            row["player_id"] = player_id_map.get(name, _virtual_player_id(name))
+            team_str = str(row.get("team") or "").strip()
+            row["player_id"] = f"{name}_{team_str}" if team_str else name
         return JsonResponse({"season": season, "q": q, "team": team or None, "rows": rows})
     except DatabaseError:
         return _error_json("database_error", "failed to search players", 500)
@@ -434,7 +500,15 @@ def player_search(request):
 def player_detail(request, player_id: str):
     season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
     pid = player_id.strip()
-    name = _resolve_player_name_from_id(pid, season) or pid
+    
+    target_team = None
+    if "_" in pid and not pid.startswith("p_"):
+        name_part, team_part = pid.rsplit("_", 1)
+        name = _resolve_player_name_from_id(pid, season) or name_part
+        target_team = team_part if team_part else None
+    else:
+        name = _resolve_player_name_from_id(pid, season) or pid
+        
     recent_n = _parse_int(request.GET.get("recent_n"), 10, min_value=1, max_value=60)
 
     missing = _missing_required_tables(["hitter_season_totals"])
@@ -442,7 +516,7 @@ def player_detail(request, player_id: str):
         return _error_json("missing_table", f"required table missing: {', '.join(missing)}", 503)
 
     try:
-        season_rows = repo.player_season_rows(name)
+        season_rows = repo.player_season_rows(name, team=target_team)
         if not season_rows:
             return _error_json(
                 "player_not_found",
@@ -455,18 +529,18 @@ def player_detail(request, player_id: str):
 
         latest_prediction = None
         if repo.table_exists("hitter_predictions"):
-            latest_prediction = repo.player_latest_prediction(season=season, player_name=name)
+            latest_prediction = repo.player_latest_prediction(season=season, player_name=name, team=target_team)
 
         trend_rows: list[dict[str, Any]] = []
         if repo.table_exists("hitter_daily_snapshots"):
-            trend_rows = repo.player_trend_rows(season=season, player_name=name)
+            trend_rows = repo.player_trend_rows(season=season, player_name=name, team=target_team)
 
         monthly: list[dict[str, Any]] = []
         vs_team: list[dict[str, Any]] = []
         recent_games: list[dict[str, Any]] = []
         if repo.table_exists("hitter_game_logs"):
             tb_expr = _safe_tb_expr("TB")
-            monthly = repo.player_monthly_rows(player_name=name, season=season, tb_expr=tb_expr)
+            monthly = repo.player_monthly_rows(player_name=name, season=season, tb_expr=tb_expr, team=target_team)
             for row in monthly:
                 ab = int(row.get("AB") or 0)
                 h = int(row.get("H") or 0)
@@ -483,7 +557,7 @@ def player_detail(request, player_id: str):
                 row["SLG"] = round(slg, 4)  # pyre-ignore
                 row["OPS"] = round(obp + slg, 4)  # pyre-ignore
 
-            vs_team = repo.player_vs_team_rows(player_name=name, season=season, tb_expr=_safe_tb_expr("TB"))
+            vs_team = repo.player_vs_team_rows(player_name=name, season=season, tb_expr=_safe_tb_expr("TB"), team=target_team)
             for row in vs_team:
                 ab = int(row.get("AB") or 0)
                 h = int(row.get("H") or 0)
@@ -497,7 +571,7 @@ def player_detail(request, player_id: str):
                 row["SLG"] = round(slg, 4)  # pyre-ignore
                 row["OPS"] = round(obp + slg, 4)  # pyre-ignore
 
-            recent_games = repo.player_recent_games_rows(player_name=name, season=season, recent_n=recent_n)
+            recent_games = repo.player_recent_games_rows(player_name=name, season=season, recent_n=recent_n, team=target_team)
             for row in recent_games:
                 ab = int(row.get("AB") or 0)
                 h = int(row.get("H") or 0)
@@ -522,6 +596,12 @@ def player_detail(request, player_id: str):
                 "COALESCE(SUM(SF),0)",
                 "COALESCE(SUM(TB_adj),0)",
             ),
+            team=target_team,
+        )
+        latest_prediction = _estimate_hitter_projection(
+            latest_prediction=latest_prediction,
+            current_agg=current_agg,
+            season=season,
         )
 
         kbreport_splits: dict[str, list[dict[str, Any]]] = {
@@ -531,7 +611,7 @@ def player_detail(request, player_id: str):
             "month": [],
         }
         if repo.table_exists("kbreport_hitter_splits"):
-            ext_rows = repo.player_kbreport_split_rows(season=season, player_name=name)
+            ext_rows = repo.player_kbreport_split_rows(season=season, player_name=name, team=target_team)
             for row in ext_rows:
                 group = str(row.get("split_group") or "")
                 if group in kbreport_splits:
