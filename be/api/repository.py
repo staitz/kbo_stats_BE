@@ -245,7 +245,7 @@ def computed_standings_rows(season: int) -> list[dict[str, Any]]:
 
 
 def home_base_totals(season: int) -> dict[str, Any]:
-    return query_one(
+    base = query_one(
         """
         SELECT
             COUNT(*) AS players,
@@ -257,6 +257,17 @@ def home_base_totals(season: int) -> dict[str, Any]:
         """,
         (season,),
     ) or {"players": 0, "teams": 0, "total_hr": 0, "total_pa": 0}
+
+    games_row = query_one(
+        """
+        SELECT COUNT(DISTINCT game_id) AS total_games
+        FROM hitter_game_logs
+        WHERE substr(game_date, 1, 4) = %s
+        """,
+        (str(season),),
+    )
+    base["total_games"] = (games_row or {}).get("total_games") or 0
+    return base
 
 
 def latest_game_date(season: int) -> str | None:
