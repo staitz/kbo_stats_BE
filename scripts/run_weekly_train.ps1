@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-Set-Location (Split-Path -Parent $MyInvocation.MyCommand.Path)\..\
+Set-Location (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..")
 
 function Assert-LastExit([string]$step) {
   if ($LASTEXITCODE -ne 0) {
@@ -9,18 +9,18 @@ function Assert-LastExit([string]$step) {
 
 # Resolve train season: use KST current year (in-season training)
 # or override with $env:KBO_TRAIN_SEASON if set.
-$trainSeason = if ($env:KBO_TRAIN_SEASON) {
-  $env:KBO_TRAIN_SEASON
+if ($env:KBO_TRAIN_SEASON) {
+  $trainSeason = $env:KBO_TRAIN_SEASON
 } else {
-  (
+  $trainSeason = (
   @'
 from datetime import datetime
 from zoneinfo import ZoneInfo
 print(datetime.now(ZoneInfo("Asia/Seoul")).year)
 '@ | python -
   ).Trim()
+  Assert-LastExit "resolve train season"
 }
-Assert-LastExit "resolve train season"
 
 Write-Host "Training mvp_pipeline hitter models for season=$trainSeason ..."
 

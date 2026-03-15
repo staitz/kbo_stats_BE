@@ -92,7 +92,12 @@ def stage_collect(season: int, dry_run: bool) -> dict[str, Any]:
 # Stage 2 — snapshot
 # ---------------------------------------------------------------------------
 
-def stage_snapshot(season: int, as_of_date: str, db_path: Path, dry_run: bool) -> dict[str, Any]:
+def stage_snapshot(
+    season: int,
+    as_of_date: str,
+    db_path: Path,
+    dry_run: bool,
+) -> dict[str, Any]:
     """Build hitter_daily_snapshots up to as_of_date."""
     # build_hitter_snapshots expects YYYYMMDD format
     as_of_yyyymmdd = as_of_date.replace("-", "")

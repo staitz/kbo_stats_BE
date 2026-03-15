@@ -95,7 +95,10 @@ def load_hitter_game_logs_from_db(db_path: str | Path, season: int) -> pd.DataFr
     return df
 
 
-def load_hitter_game_logs(input_path: str | None, season: int = 2025) -> pd.DataFrame:
+def load_hitter_game_logs(
+    input_path: str | None,
+    season: int = 2025,
+) -> pd.DataFrame:
     """Resolve the data source and return hitter game logs.
 
     Resolution order:

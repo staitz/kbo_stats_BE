@@ -2,9 +2,10 @@ import argparse
 import datetime as dt
 import sqlite3
 import time
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
+from collector.kbo_api import _make_driver
 from collector.kbo_naver_crawler import fetch_day_schedule, parse_naver_boxscore
 from collector.kbo_db import DB_PATH, init_db, insert_rows, migrate_columns
 from selenium.common.exceptions import TimeoutException, WebDriverException
@@ -38,7 +39,10 @@ def _record_failed_date(game_date: str, reason: str) -> None:
         f.write(f"{game_date}\t{reason}\n")
 
 
-def collect_for_dates(dates: List[str], upsert: bool = False) -> Dict[str, int]:
+def collect_for_dates(
+    dates: List[str],
+    upsert: bool = False,
+) -> Dict[str, int]:
     if not dates:
         return {
             "dates": 0,
