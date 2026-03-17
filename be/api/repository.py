@@ -21,6 +21,7 @@ def table_exists(table_name: str) -> bool:
     return table_name in connection.introspection.table_names()
 
 
+
 def table_has_column(table_name: str, column_name: str) -> bool:
     if not table_exists(table_name):
         return False
@@ -580,6 +581,7 @@ def statiz_player_id_by_name(player_name: str) -> str | None:
         SELECT MIN(player_id) AS player_id
         FROM statiz_players
         WHERE player_name = %s
+          AND player_id NOT LIKE 'mock_%%'
         """,
         (player_name,),
     )
@@ -598,6 +600,7 @@ def statiz_player_ids_by_names(names: list[str]) -> dict[str, str]:
         SELECT player_name, MIN(player_id) AS player_id
         FROM statiz_players
         WHERE player_name IN ({placeholders})
+          AND player_id NOT LIKE 'mock_%%'
         GROUP BY player_name
         """,
         tuple(cleaned),
@@ -906,10 +909,20 @@ def team_summary(season: int, team: str) -> dict[str, Any] | None:
 def team_leaders_ops(season: int, team: str, min_pa: int, limit: int = 10) -> list[dict[str, Any]]:
     return query_all(
         """
-        SELECT player_name, PA, H, HR, RBI, OPS
-        FROM hitter_season_totals
-        WHERE season = %s AND team = %s AND PA >= %s
-        ORDER BY OPS DESC, PA DESC
+        SELECT 
+            h.player_name, 
+            MAX(sp.birth_date) AS birth_date,
+            SUM(h.PA) AS PA, 
+            SUM(h.H) AS H, 
+            SUM(h.HR) AS HR, 
+            SUM(h.RBI) AS RBI, 
+            MAX(h.OPS) AS OPS
+        FROM hitter_season_totals h
+        LEFT JOIN statiz_players sp ON 
+            (sp.player_name = h.player_name OR sp.player_name LIKE '%% ' || h.player_name)
+        WHERE h.season = %s AND h.team = %s AND h.PA >= %s
+        GROUP BY h.player_name
+        ORDER BY MAX(h.OPS) DESC, SUM(h.PA) DESC
         LIMIT %s
         """,
         (season, team, min_pa, limit),
@@ -919,10 +932,20 @@ def team_leaders_ops(season: int, team: str, min_pa: int, limit: int = 10) -> li
 def team_leaders_hr(season: int, team: str, min_pa: int, limit: int = 10) -> list[dict[str, Any]]:
     return query_all(
         """
-        SELECT player_name, PA, H, HR, RBI, OPS
-        FROM hitter_season_totals
-        WHERE season = %s AND team = %s AND PA >= %s
-        ORDER BY HR DESC, PA DESC
+        SELECT 
+            h.player_name, 
+            MAX(sp.birth_date) AS birth_date,
+            SUM(h.PA) AS PA, 
+            SUM(h.H) AS H, 
+            SUM(h.HR) AS HR, 
+            SUM(h.RBI) AS RBI, 
+            MAX(h.OPS) AS OPS
+        FROM hitter_season_totals h
+        LEFT JOIN statiz_players sp ON 
+            (sp.player_name = h.player_name OR sp.player_name LIKE '%% ' || h.player_name)
+        WHERE h.season = %s AND h.team = %s AND h.PA >= %s
+        GROUP BY h.player_name
+        ORDER BY SUM(h.HR) DESC, SUM(h.PA) DESC
         LIMIT %s
         """,
         (season, team, min_pa, limit),
@@ -1114,6 +1137,21 @@ def player_compare_rows(season: int, names: list[str]) -> list[dict[str, Any]]:
         ORDER BY player_name ASC, OPS DESC, PA DESC
         """,
         tuple([season] + names),
+    )
+
+
+def player_profile_info(player_name: str) -> dict[str, Any] | None:
+    return query_one(
+        """
+        SELECT birth_date, position, bats_throws, debut_year
+        FROM statiz_players
+        WHERE player_name = %s
+           OR player_name LIKE %s
+           OR player_id LIKE %s
+        ORDER BY collected_at DESC
+        LIMIT 1
+        """,
+        (player_name, f"% {player_name}", f"{player_name}|%"),
     )
 
 
