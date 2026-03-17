@@ -178,6 +178,16 @@ def _virtual_player_id(player_name: str) -> str:
     return f"p_{digest}"
 
 
+_KNOWN_TEAM_NAMES = {"KIA", "LG", "KT", "NC", "SSG", "두산", "롯데", "삼성", "키움", "한화"}
+
+
+def _compact_player_name(player_name: str) -> str:
+    parts = [part for part in str(player_name or "").strip().split() if part]
+    if len(parts) <= 1:
+        return str(player_name or "").strip()
+    return parts[-1]
+
+
 def _resolve_player_name_from_id(player_id: str, season: int) -> str | None:
     pid = str(player_id or "").strip()
     if not pid:
@@ -219,6 +229,7 @@ def _preferred_player_ids(names: list[str]) -> dict[str, str]:
 @require_GET
 def health(_request):
     return JsonResponse({"status": "ok"})
+
 
 
 @require_GET
@@ -487,10 +498,10 @@ def player_search(request):
 
     try:
         rows = repo.player_search_rows(season=season, q=q, limit=limit, team=team)
+        player_id_map = _preferred_player_ids([str(row.get("player_name") or "") for row in rows])
         for row in rows:
             name = str(row.get("player_name") or "").strip()
-            team_str = str(row.get("team") or "").strip()
-            row["player_id"] = f"{name}_{team_str}" if team_str else name
+            row["player_id"] = player_id_map.get(name, _virtual_player_id(name))
         return JsonResponse({"season": season, "q": q, "team": team or None, "rows": rows})
     except DatabaseError:
         return _error_json("database_error", "failed to search players", 500)
@@ -500,15 +511,18 @@ def player_search(request):
 def player_detail(request, player_id: str):
     season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
     pid = player_id.strip()
-    
+
     target_team = None
-    if "_" in pid and not pid.startswith("p_"):
+    resolved_name = _resolve_player_name_from_id(pid, season)
+    if resolved_name:
+        name = resolved_name
+    elif "_" in pid and not pid.startswith("p_"):
         name_part, team_part = pid.rsplit("_", 1)
-        name = _resolve_player_name_from_id(pid, season) or name_part
-        target_team = team_part if team_part else None
+        name = name_part
+        target_team = team_part if team_part in _KNOWN_TEAM_NAMES else None
     else:
-        name = _resolve_player_name_from_id(pid, season) or pid
-        
+        name = pid
+
     recent_n = _parse_int(request.GET.get("recent_n"), 10, min_value=1, max_value=60)
 
     missing = _missing_required_tables(["hitter_season_totals"])
@@ -517,6 +531,13 @@ def player_detail(request, player_id: str):
 
     try:
         season_rows = repo.player_season_rows(name, team=target_team)
+        if not season_rows:
+            compact_name = _compact_player_name(name)
+            if compact_name and compact_name != name:
+                compact_rows = repo.player_season_rows(compact_name, team=target_team)
+                if compact_rows:
+                    name = compact_name
+                    season_rows = compact_rows
         if not season_rows:
             return _error_json(
                 "player_not_found",
@@ -617,6 +638,10 @@ def player_detail(request, player_id: str):
                 if group in kbreport_splits:
                     kbreport_splits[group].append(row)
 
+        profile_info: dict[str, Any] | None = None
+        if repo.table_exists("statiz_players"):
+            profile_info = repo.player_profile_info(name)
+            
         return JsonResponse(
             {
                 "season": season,
@@ -627,6 +652,8 @@ def player_detail(request, player_id: str):
                     "player_id": _preferred_player_id(name),
                     "player_name": name,
                     "teams_in_season": sorted({r["team"] for r in current_rows}) if current_rows else [],
+                    "birth_date": profile_info.get("birth_date") if profile_info else None,
+                    "bats_throws": profile_info.get("bats_throws") if profile_info else None,
                 },
                 "season_aggregate": current_agg,
                 "season_rows": current_rows,
