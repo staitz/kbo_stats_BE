@@ -99,15 +99,96 @@ def fetch_day_schedule(date_yyyymmdd: str, debug: bool = False, *args, **kwargs)
     return [game for game in month_data if game.get("date") == date_yyyymmdd]
 
 
-def parse_naver_boxscore(
-    game_id: str, game_date: str, away_team: str, home_team: str, debug: bool = False
-) -> List[Dict[str, Any]]:
+def _safe_int(value: Any) -> int:
+    try:
+        text = str(value).strip().replace(",", "")
+        if not text:
+            return 0
+        return int(float(text))
+    except Exception:
+        return 0
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        text = str(value).strip().replace(",", "")
+        if not text:
+            return 0.0
+        return float(text)
+    except Exception:
+        return 0.0
+
+
+def _pick_value(source: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in source and source.get(key) not in (None, ""):
+            return source.get(key)
+    return None
+
+
+def _ip_to_outs(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    if "." not in text:
+        return _safe_int(text) * 3
+    left, right = text.split(".", 1)
+    whole = _safe_int(left)
+    frac = _safe_int(right[:1])
+    frac = min(max(frac, 0), 2)
+    return whole * 3 + frac
+
+
+def _normalize_pitcher_role(player: Dict[str, Any]) -> str:
+    raw = str(
+        _pick_value(
+            player,
+            "role",
+            "positionName",
+            "position",
+            "pitcherRole",
+            "pitcherType",
+            "type",
+        )
+        or ""
+    ).strip()
+    if not raw:
+        if _safe_int(_pick_value(player, "hold", "hld")) > 0:
+            return "RP"
+        if _safe_int(_pick_value(player, "save", "sv")) > 0:
+            return "CL"
+        return ""
+
+    normalized = raw.upper()
+    if any(token in normalized for token in ("START", "SP", "선발")):
+        return "SP"
+    if any(token in normalized for token in ("CLOSE", "CL", "마무리")):
+        return "CL"
+    if any(token in normalized for token in ("RELIEF", "RP", "중계", "구원")):
+        return "RP"
+    return raw
+
+
+def fetch_game_record(
+    game_id: str,
+    debug: bool = False,
+) -> Dict[str, Any]:
     url = f"{BASE_URL}/schedule/games/kbo/{game_id}/record"
     data = fetch_json(url)
     if not data or "result" not in data:
-        return []
+        return {}
 
     record_data = (data.get("result") or {}).get("recordData") or {}
+    return record_data if isinstance(record_data, dict) else {}
+
+
+def parse_naver_boxscore(
+    game_id: str, game_date: str, away_team: str, home_team: str, debug: bool = False
+) -> List[Dict[str, Any]]:
+    record_data = fetch_game_record(game_id=game_id, debug=debug)
+    if not record_data:
+        return []
+
     batters_boxscore = record_data.get("battersBoxscore") or {}
     if not isinstance(batters_boxscore, dict):
         return []
@@ -148,6 +229,60 @@ def parse_naver_boxscore(
             }
             row["PA"] = row["AB"] + row["BB"] + row["HBP"] + row["SH"] + row["SF"]
             row["TB"] = row["H"] + (3 * row["HR"])
+            out_rows.append(row)
+
+    return out_rows
+
+
+def parse_naver_pitcher_boxscore(
+    game_id: str, game_date: str, away_team: str, home_team: str, debug: bool = False
+) -> List[Dict[str, Any]]:
+    record_data = fetch_game_record(game_id=game_id, debug=debug)
+    if not record_data:
+        return []
+
+    pitchers_boxscore = record_data.get("pitchersBoxscore") or {}
+    if not isinstance(pitchers_boxscore, dict):
+        return []
+
+    out_rows: List[Dict[str, Any]] = []
+    for team_key, players in pitchers_boxscore.items():
+        if not isinstance(players, list):
+            continue
+        for p in players:
+            if not isinstance(p, dict):
+                continue
+            name = str(_pick_value(p, "playerName", "name", "nameDisplay") or "").strip()
+            if not name:
+                continue
+
+            ip_value = _pick_value(p, "inn", "ip", "inning", "innings")
+            outs = _ip_to_outs(ip_value)
+            row = {
+                "game_date": game_date,
+                "game_id": game_id,
+                "team": team_key,
+                "player_name": name,
+                "role": _normalize_pitcher_role(p),
+                "W": _safe_int(_pick_value(p, "win", "w")),
+                "L": _safe_int(_pick_value(p, "lose", "loss", "l")),
+                "SV": _safe_int(_pick_value(p, "save", "sv")),
+                "HLD": _safe_int(_pick_value(p, "hold", "hld")),
+                "IP": round(outs / 3.0, 4),
+                "OUTS": outs,
+                "BF": _safe_int(_pick_value(p, "bf", "battersFaced")),
+                "NP": _safe_int(_pick_value(p, "np", "pc", "pitches")),
+                "H": _safe_int(_pick_value(p, "hit", "h")),
+                "R": _safe_int(_pick_value(p, "run", "r")),
+                "ER": _safe_int(_pick_value(p, "er")),
+                "BB": _safe_int(_pick_value(p, "bb")),
+                "SO": _safe_int(_pick_value(p, "so", "kk", "k")),
+                "HR": _safe_int(_pick_value(p, "hr")),
+                "HBP": _safe_int(_pick_value(p, "hp", "hbp")),
+                "BK": _safe_int(_pick_value(p, "bk")),
+                "WP": _safe_int(_pick_value(p, "wp")),
+                "ERA": _safe_float(_pick_value(p, "era")),
+            }
             out_rows.append(row)
 
     return out_rows
