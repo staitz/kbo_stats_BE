@@ -193,12 +193,12 @@ class ApiEndpointsTest(TestCase):
             )
 
     def test_health(self):
-        res = self.client.get("/api/health")
+        res = self.client.get("/api/health/")
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["status"], "ok")
 
     def test_home_summary(self):
-        res = self.client.get("/api/home/summary?season=2025")
+        res = self.client.get("/api/home/summary/?season=2025")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["season"], 2025)
@@ -208,7 +208,7 @@ class ApiEndpointsTest(TestCase):
         self.assertIn("min_pa_policy", data)
 
     def test_leaderboard(self):
-        res = self.client.get("/api/leaderboard?season=2025&metric=OPS&limit=2")
+        res = self.client.get("/api/leaderboard/?season=2025&metric=OPS&limit=2")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["metric"], "OPS")
@@ -218,21 +218,21 @@ class ApiEndpointsTest(TestCase):
         self.assertIn("requested_min_pa", data)
 
     def test_predictions_latest(self):
-        res = self.client.get("/api/predictions/latest?season=2025")
+        res = self.client.get("/api/predictions/latest/?season=2025")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["latest_date"], "20250410")
         self.assertTrue(len(data["rows"]) >= 1)
 
     def test_player_search(self):
-        res = self.client.get("/api/players/search?season=2025&q=홍")
+        res = self.client.get("/api/players/search/?season=2025&q=홍")
         self.assertEqual(res.status_code, 200)
         rows = res.json()["rows"]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["player_name"], "홍길동")
 
     def test_player_detail(self):
-        res = self.client.get("/api/players/홍길동?season=2025")
+        res = self.client.get("/api/players/홍길동/?season=2025")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["player_name"], "홍길동")
@@ -248,19 +248,19 @@ class ApiEndpointsTest(TestCase):
         self.assertIn("mvp_probability", data["latest_prediction"])
 
     def test_player_detail_recent_n(self):
-        res = self.client.get("/api/players/홍길동?season=2025&recent_n=1")
+        res = self.client.get("/api/players/홍길동/?season=2025&recent_n=1")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["recent_n"], 1)
         self.assertLessEqual(len(data["recent_game_logs"]), 1)
 
     def test_player_detail_not_found(self):
-        res = self.client.get("/api/players/없는선수?season=2025")
+        res = self.client.get("/api/players/없는선수/?season=2025")
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.json()["error"], "player_not_found")
 
     def test_team_detail(self):
-        res = self.client.get("/api/teams/KIA?season=2025")
+        res = self.client.get("/api/teams/KIA/?season=2025")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["team"], "KIA")
@@ -269,32 +269,32 @@ class ApiEndpointsTest(TestCase):
         self.assertIn("requested_min_pa", data)
 
     def test_player_compare(self):
-        res = self.client.get("/api/players/compare?season=2025&names=홍길동,김테스트")
+        res = self.client.get("/api/players/compare/?season=2025&names=홍길동,김테스트")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(len(data["rows"]), 2)
 
     def test_player_compare_requires_two_names(self):
-        res = self.client.get("/api/players/compare?season=2025&names=홍길동")
+        res = self.client.get("/api/players/compare/?season=2025&names=홍길동")
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.json()["error"], "at_least_two_names_required")
 
     def test_games_by_date(self):
-        res = self.client.get("/api/games?date=20250410")
+        res = self.client.get("/api/games/?date=20250410")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertTrue(len(data["rows"]) >= 1)
         self.assertEqual(data["rows"][0]["game_id"], "20250410HTLG0")
 
     def test_game_boxscore(self):
-        res = self.client.get("/api/games/20250410HTLG0/boxscore")
+        res = self.client.get("/api/games/20250410HTLG0/boxscore/")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["game_id"], "20250410HTLG0")
         self.assertTrue(len(data["hitter_rows"]) >= 1)
 
     def test_standings_match(self):
-        res = self.client.get("/api/standings?season=2025")
+        res = self.client.get("/api/standings/?season=2025")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["requested_season"], 2025)
@@ -303,7 +303,7 @@ class ApiEndpointsTest(TestCase):
         self.assertEqual(len(data["rows"]), 2)
 
     def test_standings_preseason_fallback(self):
-        res = self.client.get("/api/standings?season=2026")
+        res = self.client.get("/api/standings/?season=2026")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["requested_season"], 2026)
@@ -344,7 +344,7 @@ class ApiErrorHandlingTest(TestCase):
                 )
                 """
             )
-        res = self.client.get("/api/players/compare?season=2025&names=onlyone")
+        res = self.client.get("/api/players/compare/?season=2025&names=onlyone")
         self.assertEqual(res.status_code, 400)
         data = res.json()
         self.assertEqual(data["error"], "at_least_two_names_required")
@@ -353,7 +353,7 @@ class ApiErrorHandlingTest(TestCase):
     def test_missing_required_table_returns_non_500(self):
         with connection.cursor() as cursor:
             cursor.execute("DROP TABLE IF EXISTS hitter_season_totals")
-        res = self.client.get("/api/leaderboard?season=2025")
+        res = self.client.get("/api/leaderboard/?season=2025")
         self.assertEqual(res.status_code, 503)
         data = res.json()
         self.assertEqual(data["error"], "missing_table")
