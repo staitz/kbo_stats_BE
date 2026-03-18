@@ -685,15 +685,29 @@ def standings(request):
     try:
         as_of_date = repo.logs_latest_game_date(season)
         if not as_of_date:
-            return JsonResponse(
-                {
-                    "requested_season": requested_season,
-                    "effective_season": None,
-                    "as_of_date": None,
-                    "mode": "NO_DATA",
-                    "rows": [],
-                }
-            )
+            fallback_season = repo.logs_latest_season_at_or_before(requested_season)
+            if fallback_season is None:
+                return JsonResponse(
+                    {
+                        "requested_season": requested_season,
+                        "effective_season": None,
+                        "as_of_date": None,
+                        "mode": "NO_DATA",
+                        "rows": [],
+                    }
+                )
+            season = fallback_season
+            as_of_date = repo.logs_latest_game_date(season)
+            if not as_of_date:
+                return JsonResponse(
+                    {
+                        "requested_season": requested_season,
+                        "effective_season": None,
+                        "as_of_date": None,
+                        "mode": "NO_DATA",
+                        "rows": [],
+                    }
+                )
 
         rows = repo.computed_standings_rows(season)
         return JsonResponse(
@@ -701,7 +715,7 @@ def standings(request):
                 "requested_season": requested_season,
                 "effective_season": season,
                 "as_of_date": as_of_date,
-                "mode": "SEASON_MATCH",
+                "mode": "SEASON_MATCH" if season == requested_season else "PRESEASON_FALLBACK",
                 "rows": rows,
             }
         )
