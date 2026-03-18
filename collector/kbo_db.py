@@ -21,6 +21,29 @@ REQUIRED_COLUMNS = {
 }
 
 
+PITCHER_REQUIRED_COLUMNS = {
+    "role": "TEXT NOT NULL DEFAULT ''",
+    "W": "INTEGER NOT NULL DEFAULT 0",
+    "L": "INTEGER NOT NULL DEFAULT 0",
+    "SV": "INTEGER NOT NULL DEFAULT 0",
+    "HLD": "INTEGER NOT NULL DEFAULT 0",
+    "IP": "REAL NOT NULL DEFAULT 0",
+    "OUTS": "INTEGER NOT NULL DEFAULT 0",
+    "BF": "INTEGER NOT NULL DEFAULT 0",
+    "NP": "INTEGER NOT NULL DEFAULT 0",
+    "H": "INTEGER NOT NULL DEFAULT 0",
+    "R": "INTEGER NOT NULL DEFAULT 0",
+    "ER": "INTEGER NOT NULL DEFAULT 0",
+    "BB": "INTEGER NOT NULL DEFAULT 0",
+    "SO": "INTEGER NOT NULL DEFAULT 0",
+    "HR": "INTEGER NOT NULL DEFAULT 0",
+    "HBP": "INTEGER NOT NULL DEFAULT 0",
+    "BK": "INTEGER NOT NULL DEFAULT 0",
+    "WP": "INTEGER NOT NULL DEFAULT 0",
+    "ERA": "REAL NOT NULL DEFAULT 0",
+}
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     # 기본 테이블 생성
     conn.execute(
@@ -39,6 +62,36 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pitcher_game_logs (
+            game_date TEXT NOT NULL,
+            game_id TEXT NOT NULL,
+            team TEXT NOT NULL,
+            player_name TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT '',
+            W INTEGER NOT NULL DEFAULT 0,
+            L INTEGER NOT NULL DEFAULT 0,
+            SV INTEGER NOT NULL DEFAULT 0,
+            HLD INTEGER NOT NULL DEFAULT 0,
+            IP REAL NOT NULL DEFAULT 0,
+            OUTS INTEGER NOT NULL DEFAULT 0,
+            BF INTEGER NOT NULL DEFAULT 0,
+            NP INTEGER NOT NULL DEFAULT 0,
+            H INTEGER NOT NULL DEFAULT 0,
+            R INTEGER NOT NULL DEFAULT 0,
+            ER INTEGER NOT NULL DEFAULT 0,
+            BB INTEGER NOT NULL DEFAULT 0,
+            SO INTEGER NOT NULL DEFAULT 0,
+            HR INTEGER NOT NULL DEFAULT 0,
+            HBP INTEGER NOT NULL DEFAULT 0,
+            BK INTEGER NOT NULL DEFAULT 0,
+            WP INTEGER NOT NULL DEFAULT 0,
+            ERA REAL NOT NULL DEFAULT 0,
+            UNIQUE (game_id, team, player_name)
+        )
+        """
+    )
     conn.commit()
 
 
@@ -53,6 +106,17 @@ def migrate_columns(conn: sqlite3.Connection) -> None:
         # 숫자로 시작하는 컬럼명(예: 2B, 3B)은 반드시 따옴표로 감싸야 한다
         safe_col = f'"{col}"' if col[0].isdigit() else col
         conn.execute(f"ALTER TABLE hitter_game_logs ADD COLUMN {safe_col} {col_def}")
+    conn.commit()
+
+
+def migrate_pitcher_columns(conn: sqlite3.Connection) -> None:
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(pitcher_game_logs)").fetchall()
+    }
+    for col, col_def in PITCHER_REQUIRED_COLUMNS.items():
+        if col in existing:
+            continue
+        conn.execute(f"ALTER TABLE pitcher_game_logs ADD COLUMN {col} {col_def}")
     conn.commit()
 
 
@@ -130,6 +194,90 @@ def insert_rows(
             SB=excluded.SB,
             CS=excluded.CS,
             GDP=excluded.GDP
+        """,
+        values,
+    )
+    conn.commit()
+    return cursor.rowcount
+
+
+def _pitcher_row_to_values(row: Dict[str, Any]) -> Tuple[Any, ...]:
+    return (
+        row.get("game_date"),
+        row.get("game_id"),
+        row.get("team"),
+        row.get("player_name"),
+        str(row.get("role") or ""),
+        int(row.get("W", 0)),
+        int(row.get("L", 0)),
+        int(row.get("SV", 0)),
+        int(row.get("HLD", 0)),
+        float(row.get("IP", 0)),
+        int(row.get("OUTS", 0)),
+        int(row.get("BF", 0)),
+        int(row.get("NP", 0)),
+        int(row.get("H", 0)),
+        int(row.get("R", 0)),
+        int(row.get("ER", 0)),
+        int(row.get("BB", 0)),
+        int(row.get("SO", 0)),
+        int(row.get("HR", 0)),
+        int(row.get("HBP", 0)),
+        int(row.get("BK", 0)),
+        int(row.get("WP", 0)),
+        float(row.get("ERA", 0)),
+    )
+
+
+def insert_pitcher_rows(
+    conn: sqlite3.Connection,
+    rows: Iterable[Dict[str, Any]],
+    upsert: bool = False,
+) -> int:
+    values: List[Tuple[Any, ...]] = [_pitcher_row_to_values(r) for r in rows]
+    if not values:
+        return 0
+
+    cursor = conn.cursor()
+    if not upsert:
+        cursor.executemany(
+            """
+            INSERT OR IGNORE INTO pitcher_game_logs
+            (game_date, game_id, team, player_name, role, W, L, SV, HLD, IP, OUTS, BF, NP,
+             H, R, ER, BB, SO, HR, HBP, BK, WP, ERA)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            values,
+        )
+        conn.commit()
+        return cursor.rowcount
+
+    cursor.executemany(
+        """
+        INSERT INTO pitcher_game_logs
+        (game_date, game_id, team, player_name, role, W, L, SV, HLD, IP, OUTS, BF, NP,
+         H, R, ER, BB, SO, HR, HBP, BK, WP, ERA)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(game_id, team, player_name) DO UPDATE SET
+            role=excluded.role,
+            W=excluded.W,
+            L=excluded.L,
+            SV=excluded.SV,
+            HLD=excluded.HLD,
+            IP=excluded.IP,
+            OUTS=excluded.OUTS,
+            BF=excluded.BF,
+            NP=excluded.NP,
+            H=excluded.H,
+            R=excluded.R,
+            ER=excluded.ER,
+            BB=excluded.BB,
+            SO=excluded.SO,
+            HR=excluded.HR,
+            HBP=excluded.HBP,
+            BK=excluded.BK,
+            WP=excluded.WP,
+            ERA=excluded.ERA
         """,
         values,
     )
