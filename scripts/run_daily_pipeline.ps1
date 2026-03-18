@@ -10,6 +10,8 @@ function Assert-LastExit([string]$step) {
 # Crawl: auto-detect season start from KBO schedule (current KST year)
 python -m collector.run_range_hitter --auto-start --upsert
 Assert-LastExit "collector.run_range_hitter"
+python -m collector.run_range_pitcher --auto-start --upsert
+Assert-LastExit "collector.run_range_pitcher"
 
 # Snapshot range from existing logs for current season (KST year)
 $season = (python -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('Asia/Seoul')).year)").Trim()
@@ -50,3 +52,7 @@ if ([string]::IsNullOrWhiteSpace($start) -or [string]::IsNullOrWhiteSpace($end) 
 
 python -m prediction.build_hitter_snapshots --db kbo_stats.db --season $season --start $start --end $end --upsert
 Assert-LastExit "prediction.build_hitter_snapshots"
+python -m prediction.build_hitter_season_totals --db kbo_stats.db --season $season --upsert
+Assert-LastExit "prediction.build_hitter_season_totals"
+python -m prediction.build_pitcher_season_totals --db kbo_stats.db --season $season --upsert
+Assert-LastExit "prediction.build_pitcher_season_totals"
