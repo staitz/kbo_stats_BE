@@ -4,6 +4,10 @@ from typing import Any
 from django.db import connection
 
 
+OPS_WAR_FALLBACK_BASELINE = 0.700
+OPS_WAR_FALLBACK_DIVISOR = 70.0
+
+
 def query_all(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
@@ -84,6 +88,19 @@ def leaderboard_candidate_count(season: int, min_pa: int, team: str = "") -> int
         params.append(team)
     row = query_one(
         f"SELECT COUNT(*) AS total FROM hitter_season_totals WHERE {' AND '.join(where)}",
+        tuple(params),
+    )
+    return int((row or {}).get("total") or 0)
+
+
+def pitcher_leaderboard_candidate_count(season: int, min_outs: int, team: str = "") -> int:
+    where = ["season = %s", "OUTS >= %s"]
+    params: list[Any] = [season, min_outs]
+    if team:
+        where.append("team = %s")
+        params.append(team)
+    row = query_one(
+        f"SELECT COUNT(*) AS total FROM pitcher_season_totals WHERE {' AND '.join(where)}",
         tuple(params),
     )
     return int((row or {}).get("total") or 0)
@@ -324,7 +341,18 @@ def top_hr_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any]
 
 
 def top_war_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any]]:
-    # Prefer real WAR column if it exists.
+    if table_has_column("hitter_season_totals", "batter_war"):
+        return query_all(
+            """
+            SELECT team, player_name, PA, H, HR, RBI, OPS, batter_war AS WAR
+            FROM hitter_season_totals
+            WHERE season = %s AND PA >= %s
+            ORDER BY batter_war DESC, PA DESC
+            LIMIT %s
+            """,
+            (season, min_pa, limit),
+        )
+
     if table_has_column("hitter_season_totals", "WAR"):
         return query_all(
             """
@@ -337,9 +365,10 @@ def top_war_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any
             (season, min_pa, limit),
         )
 
-    # Fallback: pseudo-WAR approximation from OPS and PA to keep UI populated.
+    # Fallback: keep the historical OPS/PA proxy if richer batter_war inputs
+    # are unavailable in the current table shape.
     return query_all(
-        """
+        f"""
         SELECT
             team,
             player_name,
@@ -348,7 +377,7 @@ def top_war_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any
             HR,
             RBI,
             OPS,
-            ROUND(((OPS - 0.700) * PA) / 70.0, 2) AS WAR
+            ROUND(((OPS - {OPS_WAR_FALLBACK_BASELINE}) * PA) / {OPS_WAR_FALLBACK_DIVISOR}, 2) AS WAR
         FROM hitter_season_totals
         WHERE season = %s AND PA >= %s
         ORDER BY WAR DESC, PA DESC
@@ -358,8 +387,28 @@ def top_war_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any
     )
 
 
-def top_era_rows(season: int, limit: int = 5) -> list[dict[str, Any]]:
-    # No pitcher table in current MVP DB; derive team run-prevention ranking (RA/G) from game logs.
+def top_era_rows(season: int, limit: int = 5, min_outs: int = 15) -> list[dict[str, Any]]:
+    if table_exists("pitcher_season_totals"):
+        return query_all(
+            """
+            SELECT
+                team,
+                player_name,
+                ROUND(ERA, 3) AS ERA,
+                ROUND(WHIP, 3) AS WHIP,
+                SO,
+                W,
+                SV,
+                HLD,
+                OUTS
+            FROM pitcher_season_totals
+            WHERE season = %s AND OUTS >= %s
+            ORDER BY ERA ASC, OUTS DESC, SO DESC, player_name ASC
+            LIMIT %s
+            """,
+            (season, min_outs, limit),
+        )
+
     if not table_exists("hitter_game_logs"):
         return []
 
@@ -412,6 +461,19 @@ def leaderboard_total(season: int, min_pa: int, team: str = "") -> int:
     return int((row or {}).get("total") or 0)
 
 
+def pitcher_leaderboard_total(season: int, min_outs: int, team: str = "") -> int:
+    where = ["season = %s", "OUTS >= %s"]
+    params: list[Any] = [season, min_outs]
+    if team:
+        where.append("team = %s")
+        params.append(team)
+    row = query_one(
+        f"SELECT COUNT(*) AS total FROM pitcher_season_totals WHERE {' AND '.join(where)}",
+        tuple(params),
+    )
+    return int((row or {}).get("total") or 0)
+
+
 def leaderboard_rows(
     season: int,
     min_pa: int,
@@ -437,6 +499,56 @@ def leaderboard_rows(
         FROM hitter_season_totals
         WHERE {where_sql}
         ORDER BY {order_clause}, PA DESC, player_name ASC
+        LIMIT %s OFFSET %s
+        """,
+        tuple(params + [limit, offset]),
+    )
+
+
+def pitcher_leaderboard_rows(
+    season: int,
+    min_outs: int,
+    order_metric: str,
+    limit: int,
+    offset: int,
+    team: str = "",
+) -> list[dict[str, Any]]:
+    where = ["season = %s", "OUTS >= %s"]
+    params: list[Any] = [season, min_outs]
+    if team:
+        where.append("team = %s")
+        params.append(team)
+    where_sql = " AND ".join(where)
+
+    order_clause = f"{order_metric} ASC"
+    if order_metric in {"W", "SV", "HLD", "SO", "IP"}:
+        order_clause = f"{order_metric} DESC"
+
+    return query_all(
+        f"""
+        SELECT
+            team,
+            player_name,
+            role,
+            games,
+            W,
+            L,
+            SV,
+            HLD,
+            ROUND(IP, 1) AS IP,
+            OUTS,
+            H,
+            ER,
+            BB,
+            SO,
+            ROUND(ERA, 3) AS ERA,
+            ROUND(WHIP, 3) AS WHIP,
+            ROUND(K9, 2) AS K9,
+            ROUND(BB9, 2) AS BB9,
+            ROUND(KBB, 2) AS KBB
+        FROM pitcher_season_totals
+        WHERE {where_sql}
+        ORDER BY {order_clause}, OUTS DESC, SO DESC, player_name ASC
         LIMIT %s OFFSET %s
         """,
         tuple(params + [limit, offset]),
@@ -522,15 +634,55 @@ def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[
     if team:
         where.append("team = %s")
         params.append(team)
+    where_sql = " AND ".join(where)
+
+    # Hitter-only when pitcher table is absent
+    if not table_exists("pitcher_season_totals"):
+        return query_all(
+            f"""
+            SELECT
+                'hitter' AS player_type,
+                team, player_name, PA, AB, H, HR, OPS,
+                CASE WHEN AB > 0 THEN ROUND(1.0 * H / AB, 3) ELSE 0 END AS AVG
+            FROM hitter_season_totals
+            WHERE {where_sql}
+            ORDER BY
+                CASE WHEN PA >= 100 THEN 1 ELSE 0 END DESC,
+                CASE WHEN AB > 0 THEN 1.0 * H / AB ELSE 0 END DESC,
+                COALESCE(OPS, 0) DESC, PA DESC
+            LIMIT %s
+            """,
+            tuple(params + [limit]),
+        )
+
     return query_all(
         f"""
-        SELECT team, player_name, PA, AB, H, HR, OPS
-        FROM hitter_season_totals
-        WHERE {' AND '.join(where)}
-        ORDER BY OPS DESC, PA DESC
+        SELECT player_type, team, player_name, PA, AB, H, HR, OPS, AVG
+        FROM (
+            SELECT
+                'hitter' AS player_type,
+                team, player_name, PA, AB, H, HR, OPS,
+                CASE WHEN AB > 0 THEN ROUND(1.0 * H / AB, 3) ELSE NULL END AS AVG
+            FROM hitter_season_totals
+            WHERE {where_sql}
+            UNION ALL
+            SELECT
+                'pitcher' AS player_type,
+                team, player_name,
+                NULL AS PA, NULL AS AB, NULL AS H, NULL AS HR, NULL AS OPS, NULL AS AVG
+            FROM pitcher_season_totals
+            WHERE {where_sql}
+        )
+        ORDER BY
+            CASE WHEN player_type = 'hitter' AND PA >= 100 THEN 2
+                 WHEN player_type = 'hitter' THEN 1
+                 ELSE 0 END DESC,
+            CASE WHEN player_type = 'hitter' AND AB > 0 THEN 1.0 * H / AB ELSE 0.0 END DESC,
+            COALESCE(OPS, 0.0) DESC,
+            COALESCE(PA, 0) DESC
         LIMIT %s
         """,
-        tuple(params + [limit]),
+        tuple(params + params + [limit]),
     )
 
 
@@ -549,6 +701,29 @@ def player_distinct_names(season: int | None = None) -> list[str]:
             """
             SELECT DISTINCT player_name
             FROM hitter_season_totals
+            WHERE season = %s AND TRIM(player_name) <> ''
+            ORDER BY player_name ASC
+            """,
+            (season,),
+    )
+    return [str(r.get("player_name") or "").strip() for r in rows if str(r.get("player_name") or "").strip()]
+
+
+def pitcher_distinct_names(season: int | None = None) -> list[str]:
+    if season is None:
+        rows = query_all(
+            """
+            SELECT DISTINCT player_name
+            FROM pitcher_season_totals
+            WHERE TRIM(player_name) <> ''
+            ORDER BY player_name ASC
+            """
+        )
+    else:
+        rows = query_all(
+            """
+            SELECT DISTINCT player_name
+            FROM pitcher_season_totals
             WHERE season = %s AND TRIM(player_name) <> ''
             ORDER BY player_name ASC
             """,
@@ -613,16 +788,23 @@ def statiz_player_ids_by_names(names: list[str]) -> dict[str, str]:
 
 
 def player_season_rows(player_name: str, team: str | None = None) -> list[dict[str, Any]]:
-    # WAR 컬럼이 있으면 그대로, 없으면 pseudo-WAR 근사치 계산
-    if table_has_column("hitter_season_totals", "WAR"):
+    # Prefer the richer wOBA-based batter_war when present.
+    # Keep the historical OPS fallback only for older tables that do not
+    # yet expose batter_war/WAR.
+    if table_has_column("hitter_season_totals", "batter_war"):
+        war_expr = "batter_war AS WAR"
+    elif table_has_column("hitter_season_totals", "WAR"):
         war_expr = "WAR"
     else:
-        war_expr = "ROUND(((OPS - 0.700) * PA) / 70.0, 2) AS WAR"
+        war_expr = (
+            f"ROUND(((OPS - {OPS_WAR_FALLBACK_BASELINE}) * PA) / "
+            f"{OPS_WAR_FALLBACK_DIVISOR}, 2) AS WAR"
+        )
 
-    where = ["player_name = %s"]
+    where = ["TRIM(player_name) = TRIM(%s)"]
     params: list[Any] = [player_name]
     if team:
-        where.append("team = %s")
+        where.append("TRIM(team) = TRIM(%s)")
         params.append(team)
 
     return query_all(
@@ -637,22 +819,152 @@ def player_season_rows(player_name: str, team: str | None = None) -> list[dict[s
     )
 
 
-def player_latest_prediction(season: int, player_name: str, team: str | None = None) -> dict[str, Any] | None:
-    where = ["season = %s", "player_name = %s"]
-    params: list[Any] = [season, player_name]
+def pitcher_player_season_rows(player_name: str, team: str | None = None) -> list[dict[str, Any]]:
+    where = ["TRIM(player_name) = TRIM(%s)"]
+    params: list[Any] = [player_name]
+    if team:
+        where.append("TRIM(team) = TRIM(%s)")
+        params.append(team)
+
+    return query_all(
+        f"""
+        SELECT
+            season,
+            team,
+            player_name,
+            role,
+            games,
+            W,
+            L,
+            SV,
+            HLD,
+            ROUND(IP, 1) AS IP,
+            OUTS,
+            H,
+            ER,
+            BB,
+            SO,
+            ROUND(ERA, 3) AS ERA,
+            ROUND(WHIP, 3) AS WHIP,
+            ROUND(K9, 2) AS K9,
+            ROUND(BB9, 2) AS BB9,
+            ROUND(KBB, 2) AS KBB,
+            ROUND(FIP, 3) AS FIP,
+            ROUND(COALESCE(pitcher_war, WAR), 2) AS WAR
+        FROM pitcher_season_totals
+        WHERE {' AND '.join(where)}
+        ORDER BY season DESC, team ASC
+        """,
+        tuple(params),
+    )
+
+
+def pitcher_player_monthly_rows(player_name: str, season: int, team: str | None = None) -> list[dict[str, Any]]:
+    where = ["player_name = %s", "substr(game_date, 1, 4) = %s"]
+    params: list[Any] = [player_name, str(season)]
     if team:
         where.append("team = %s")
+        params.append(team)
+
+    return query_all(
+        f"""
+        WITH monthly_raw AS (
+            SELECT
+                substr(game_date, 1, 6) AS month,
+                team,
+                COUNT(DISTINCT game_id) AS games,
+                SUM(W)   AS W,
+                SUM(L)   AS L,
+                SUM(SV)  AS SV,
+                SUM(HLD) AS HLD,
+                SUM(OUTS) AS OUTS,
+                SUM(H)   AS H,
+                SUM(ER)  AS ER,
+                SUM(BB)  AS BB,
+                SUM(SO)  AS SO
+            FROM pitcher_game_logs
+            WHERE {' AND '.join(where)}
+            GROUP BY substr(game_date, 1, 6), team
+        ),
+        monthly_cum AS (
+            SELECT
+                month, team, games, W, L, SV, HLD, OUTS, H, ER, BB, SO,
+                ROUND(1.0 * OUTS / 3.0, 1) AS IP,
+                SUM(OUTS) OVER (ORDER BY month ROWS UNBOUNDED PRECEDING) AS cum_outs,
+                SUM(ER)   OVER (ORDER BY month ROWS UNBOUNDED PRECEDING) AS cum_er,
+                SUM(H)    OVER (ORDER BY month ROWS UNBOUNDED PRECEDING) AS cum_h,
+                SUM(BB)   OVER (ORDER BY month ROWS UNBOUNDED PRECEDING) AS cum_bb,
+                SUM(SO)   OVER (ORDER BY month ROWS UNBOUNDED PRECEDING) AS cum_so
+            FROM monthly_raw
+        )
+        SELECT
+            month, team, games,
+            W, L, SV, HLD,
+            OUTS, IP, H, ER, BB, SO,
+            CASE WHEN cum_outs > 0 THEN ROUND(27.0 * cum_er  / cum_outs, 3) ELSE 0 END AS ERA,
+            CASE WHEN cum_outs > 0 THEN ROUND(3.0  * (cum_bb + cum_h) / cum_outs, 3) ELSE 0 END AS WHIP,
+            CASE WHEN cum_outs > 0 THEN ROUND(27.0 * cum_so  / cum_outs, 2) ELSE 0 END AS K9,
+            CASE WHEN cum_outs > 0 THEN ROUND(27.0 * cum_bb  / cum_outs, 2) ELSE 0 END AS BB9
+        FROM monthly_cum
+        ORDER BY month ASC, team ASC
+        """,
+        tuple(params),
+    )
+
+
+def pitcher_player_current_aggregate(season: int, player_name: str, team: str | None = None) -> dict[str, Any] | None:
+    where = ["TRIM(player_name) = TRIM(%s)", "substr(game_date, 1, 4) = %s"]
+    params: list[Any] = [player_name, str(season)]
+    if team:
+        where.append("TRIM(team) = TRIM(%s)")
+        params.append(team)
+
+    return query_one(
+        f"""
+        SELECT
+            MAX(game_date) AS latest_game_date,
+            MIN(team) AS team,
+            COUNT(DISTINCT game_id) AS games,
+            SUM(W) AS W,
+            SUM(L) AS L,
+            SUM(SV) AS SV,
+            SUM(HLD) AS HLD,
+            SUM(OUTS) AS OUTS,
+            ROUND(1.0 * SUM(OUTS) / 3.0, 1) AS IP,
+            SUM(H) AS H,
+            SUM(ER) AS ER,
+            SUM(BB) AS BB,
+            SUM(SO) AS SO,
+            CASE WHEN SUM(OUTS) > 0 THEN ROUND(27.0 * SUM(ER) / SUM(OUTS), 3) ELSE 0 END AS ERA,
+            CASE WHEN SUM(OUTS) > 0 THEN ROUND(3.0 * (SUM(BB) + SUM(H)) / SUM(OUTS), 3) ELSE 0 END AS WHIP,
+            CASE WHEN SUM(OUTS) > 0 THEN ROUND(27.0 * SUM(SO) / SUM(OUTS), 2) ELSE 0 END AS K9,
+            CASE WHEN SUM(OUTS) > 0 THEN ROUND(27.0 * SUM(BB) / SUM(OUTS), 2) ELSE 0 END AS BB9,
+            CASE WHEN SUM(BB) > 0 THEN ROUND(1.0 * SUM(SO) / SUM(BB), 2) ELSE NULL END AS KBB
+        FROM pitcher_game_logs
+        WHERE {' AND '.join(where)}
+        """,
+        tuple(params),
+    )
+
+
+def player_latest_prediction(season: int, player_name: str, team: str | None = None) -> dict[str, Any] | None:
+    where = ["season = %s", "TRIM(player_name) = TRIM(%s)"]
+    params: list[Any] = [season, player_name]
+    if team:
+        where.append("TRIM(team) = TRIM(%s)")
         params.append(team)
     where_sql = " AND ".join(where)
 
     try:
         return query_one(
             f"""
-            SELECT season, as_of_date, team, predicted_hr_final, predicted_ops_final, predicted_war_final,
-                   confidence_level, confidence_score, model_source, pa_to_date
+            SELECT season, as_of_date, team, player_name, predicted_hr_final, predicted_ops_final, predicted_war_final,
+                   confidence_level, confidence_score, model_source, pa_to_date, prediction_mode
             FROM hitter_predictions
             WHERE {where_sql}
-            ORDER BY as_of_date DESC
+            ORDER BY
+                CASE WHEN prediction_mode = 'prediction' THEN 0 ELSE 1 END ASC,
+                as_of_date DESC
             LIMIT 1
             """,
             tuple(params),
@@ -669,6 +981,37 @@ def player_latest_prediction(season: int, player_name: str, team: str | None = N
             """,
             tuple(params),
         )
+
+
+def pitcher_player_latest_prediction(season: int, player_name: str, team: str | None = None) -> dict[str, Any] | None:
+    where = ["season = %s", "TRIM(player_name) = TRIM(%s)"]
+    params: list[Any] = [season, player_name]
+    if team:
+        where.append("TRIM(team) = TRIM(%s)")
+        params.append(team)
+    return query_one(
+        f"""
+        SELECT
+            season,
+            as_of_date,
+            team,
+            player_name,
+            role,
+            predicted_era_final,
+            predicted_whip_final,
+            predicted_war_final,
+            ip_to_date,
+            so_to_date,
+            confidence_score,
+            confidence_level,
+            model_source
+        FROM pitcher_predictions
+        WHERE {' AND '.join(where)}
+        ORDER BY as_of_date DESC
+        LIMIT 1
+        """,
+        tuple(params),
+    )
 
 
 def prediction_rows_for_as_of(season: int, as_of_date: str) -> list[dict[str, Any]]:
@@ -834,10 +1177,10 @@ def player_recent_games_rows(player_name: str, season: int, recent_n: int, team:
 
 
 def player_current_aggregate(season: int, player_name: str, ops_expr: str, team: str | None = None) -> dict[str, Any] | None:
-    where = ["season = %s", "player_name = %s"]
+    where = ["season = %s", "TRIM(player_name) = TRIM(%s)"]
     params: list[Any] = [season, player_name]
     if team:
-        where.append("team = %s")
+        where.append("TRIM(team) = TRIM(%s)")
         params.append(team)
 
     return query_one(
@@ -882,7 +1225,34 @@ def player_kbreport_split_rows(season: int, player_name: str, team: str | None =
         ORDER BY split_group ASC, split_key ASC
         """,
         tuple(params),
+        )
+
+
+def pitcher_prediction_rows_for_as_of(season: int, as_of_date: str) -> list[dict[str, Any]]:
+    return query_all(
+        """
+        SELECT
+            team,
+            player_name,
+            COALESCE(role, '') AS role,
+            COALESCE(predicted_era_final, 0) AS predicted_era_final,
+            COALESCE(predicted_whip_final, 0) AS predicted_whip_final,
+            COALESCE(predicted_war_final, 0) AS predicted_war_final,
+            COALESCE(ip_to_date, 0) AS ip_to_date,
+            COALESCE(so_to_date, 0) AS so_to_date
+        FROM pitcher_predictions
+        WHERE season = %s AND as_of_date = %s
+        """,
+        (season, as_of_date),
     )
+
+
+def pitcher_latest_prediction_date(season: int) -> str | None:
+    row = query_one(
+        "SELECT MAX(as_of_date) AS latest_prediction_date FROM pitcher_predictions WHERE season = %s",
+        (season,),
+    )
+    return (row or {}).get("latest_prediction_date")
 
 
 def team_summary(season: int, team: str) -> dict[str, Any] | None:
