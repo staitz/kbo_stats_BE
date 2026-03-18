@@ -10,6 +10,17 @@ import pandas as pd
 from .config import AppConfig, get_config
 
 
+BB_WOBA_WEIGHT = 0.69
+HBP_WOBA_WEIGHT = 0.72
+SINGLE_WOBA_WEIGHT = 0.89
+DOUBLE_WOBA_WEIGHT = 1.27
+TRIPLE_WOBA_WEIGHT = 1.62
+HR_WOBA_WEIGHT = 2.10
+WOBA_SCALE_FALLBACK = 1.25
+REP_RUNS_PER_PA = 0.03
+RUNS_PER_WIN = 10.0
+
+
 def optimize_numeric_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for col in out.select_dtypes(include=["int64"]).columns:
@@ -31,6 +42,26 @@ def _safe_scalar_divide(numerator: float, denominator: float) -> float:
     if denominator == 0:
         return 0.0
     return float(numerator) / float(denominator)
+
+
+def _woba_series(
+    singles: pd.Series,
+    doubles: pd.Series,
+    triples: pd.Series,
+    hr: pd.Series,
+    bb: pd.Series,
+    hbp: pd.Series,
+    denominator: pd.Series,
+) -> pd.Series:
+    numerator = (
+        (BB_WOBA_WEIGHT * bb)
+        + (HBP_WOBA_WEIGHT * hbp)
+        + (SINGLE_WOBA_WEIGHT * singles)
+        + (DOUBLE_WOBA_WEIGHT * doubles)
+        + (TRIPLE_WOBA_WEIGHT * triples)
+        + (HR_WOBA_WEIGHT * hr)
+    )
+    return _safe_divide(numerator, denominator).fillna(0.0)
 
 
 @dataclass(slots=True)
@@ -126,8 +157,49 @@ class HitterFeatureBuilder:
             df["game_ops"] = (((df["H"] + df["BB"] + df["HBP"]) / obp_den) + (df["TB"] / df["AB"].replace(0, np.nan))).fillna(0.0)
         else:
             df["game_ops"] = pd.to_numeric(df["game_ops"], errors="coerce").fillna(0.0)
+        singles = (df["H"] - df["2B"] - df["3B"] - df["HR"]).clip(lower=0)
+        game_woba_den = df["AB"] + df["BB"] + df["HBP"] + df["SF"]
+        df["game_woba"] = _woba_series(
+            singles=singles,
+            doubles=df["2B"],
+            triples=df["3B"],
+            hr=df["HR"],
+            bb=df["BB"],
+            hbp=df["HBP"],
+            denominator=game_woba_den,
+        )
+
+        season_totals = (
+            df.assign(single=singles)
+            .groupby("season", dropna=False, as_index=False)[["BB", "HBP", "single", "2B", "3B", "HR", "AB", "SF"]]
+            .sum()
+        )
+        league_woba_by_season = {
+            row["season"]: _safe_scalar_divide(
+                (
+                    (BB_WOBA_WEIGHT * float(row["BB"]))
+                    + (HBP_WOBA_WEIGHT * float(row["HBP"]))
+                    + (SINGLE_WOBA_WEIGHT * float(row["single"]))
+                    + (DOUBLE_WOBA_WEIGHT * float(row["2B"]))
+                    + (TRIPLE_WOBA_WEIGHT * float(row["3B"]))
+                    + (HR_WOBA_WEIGHT * float(row["HR"]))
+                ),
+                float(row["AB"] + row["BB"] + row["HBP"] + row["SF"]),
+            )
+            for _, row in season_totals.iterrows()
+        }
+        df["lg_woba"] = df["season"].map(league_woba_by_season).fillna(0.0)
         if "war_game" not in df.columns:
-            df["war_game"] = (((df["game_ops"] - 0.700) * df["PA"]) / 70.0).clip(lower=-0.3, upper=0.6).fillna(0.0)
+            # BsR, FieldingRuns, and PositionalAdjustment are not present in the
+            # current game-log schema. Keep them at 0 until those sources exist.
+            # TODO: add BsR / fielding / positional inputs when they are ingested.
+            df["war_game"] = (
+                (
+                    ((df["game_woba"] - df["lg_woba"]) / WOBA_SCALE_FALLBACK) * df["PA"]
+                )
+                + (df["PA"] * REP_RUNS_PER_PA)
+            ) / RUNS_PER_WIN
+            df["war_game"] = df["war_game"].fillna(0.0)
         else:
             df["war_game"] = pd.to_numeric(df["war_game"], errors="coerce").fillna(0.0)
 
