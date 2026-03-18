@@ -48,15 +48,54 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
+def _classify_status(raw_status: str | None, result: str | None) -> str:
+    """Classify a raw Naver statusInfo string into a normalized category.
+
+    Returns one of:
+      'finished'  – game ended (result data may or may not exist)
+      'cancelled'  – rain cancellation, postponement, official cancel
+      'suspended'  – suspended/interrupted game
+      'scheduled'  – upcoming / not-yet-started game
+      'unknown'    – status absent or unrecognized
+    """
+    # If we have a W/L/D result the game clearly finished
+    if result is not None:
+        return "finished"
+
+    if not raw_status:
+        # No status recorded but no result either → almost certainly a scheduled game
+        return "scheduled"
+
+    s = raw_status.replace(" ", "")
+
+    # Cancelled / postponed family
+    if any(k in s for k in ["취소", "우천", "강우", "연기", "postpone", "cancel"]):
+        return "cancelled"
+
+    # Suspended / interrupted
+    if any(k in s for k in ["서스펜", "중단", "suspend"]):
+        return "suspended"
+
+    # Already ended (no result row yet → data gap)
+    if any(k in s for k in ["종료", "finish", "end"]):
+        return "finished"
+
+    # Scheduled / pre-game
+    if any(k in s for k in ["경기전", "예정", "scheduled", "before"]):
+        return "scheduled"
+
+    return "unknown"
+
+
 def _estimate_hitter_projection(
     latest_prediction: dict[str, Any] | None,
     current_agg: dict[str, Any] | None,
     season: int,
 ) -> dict[str, Any] | None:
-    if not latest_prediction or not current_agg:
+    if not current_agg:
         return latest_prediction
 
-    enriched = dict(latest_prediction)
+    enriched = dict(latest_prediction or {})
     team = str(enriched.get("team") or "").strip()
     team_games = repo.max_team_games(season, team) if team else 0
     season_games = 144
@@ -68,15 +107,31 @@ def _estimate_hitter_projection(
     enriched["predicted_hits_final"] = round(hits_to_date * pace_factor)
     enriched["predicted_rbi_final"] = round(rbi_to_date * pace_factor)
 
+    # Award probabilities should reflect only actual model-backed hitter rows.
+    # If the player has no model prediction row or the sample is too small,
+    # keep the probabilities at zero instead of inferring them from fallbacks.
+    pa_to_date = float(enriched.get("pa_to_date") or 0)
+    model_source = str(enriched.get("model_source") or "").strip().upper()
+    if pa_to_date < 80 or model_source in {"", "PACE_BASED_HITTER"}:
+        enriched["mvp_probability"] = 0.0
+        enriched["golden_glove_probability"] = 0.0
+        return enriched
+
     as_of_date = str(enriched.get("as_of_date") or "").strip()
     if not as_of_date:
+        enriched["mvp_probability"] = 0.0
+        enriched["golden_glove_probability"] = 0.0
         return enriched
 
     comparison_rows = repo.prediction_rows_for_as_of(season=season, as_of_date=as_of_date)
     qualified = [row for row in comparison_rows if float(row.get("pa_to_date") or 0) >= 80]
     if not qualified:
-        qualified = comparison_rows
+        enriched["mvp_probability"] = 0.0
+        enriched["golden_glove_probability"] = 0.0
+        return enriched
     if not qualified:
+        enriched["mvp_probability"] = 0.0
+        enriched["golden_glove_probability"] = 0.0
         return enriched
 
     qualified.sort(
@@ -88,18 +143,32 @@ def _estimate_hitter_projection(
     )
 
     total = len(qualified)
-    player_name = str(enriched.get("player_name") or "").strip()
+    player_name = str(enriched.get("player_name") or current_agg.get("player_name") or "").strip()
     player_row = next((row for row in qualified if str(row.get("player_name") or "").strip() == player_name), None)
-    if not player_row:
-        return enriched
-
-    rank = next(
-        (index for index, row in enumerate(qualified, start=1) if str(row.get("player_name") or "").strip() == player_name),
-        total,
-    )
+    player_war = float(enriched.get("predicted_war_final") or (player_row or {}).get("predicted_war_final") or 0)
+    player_ops = float(enriched.get("predicted_ops_final") or (player_row or {}).get("predicted_ops_final") or 0)
+    if player_row:
+        rank = next(
+            (index for index, row in enumerate(qualified, start=1) if str(row.get("player_name") or "").strip() == player_name),
+            total,
+        )
+    else:
+        rank = 1 + sum(
+            1
+            for row in qualified
+            if (
+                float(row.get("predicted_war_final") or 0),
+                float(row.get("predicted_ops_final") or 0),
+                str(row.get("player_name") or ""),
+            )
+            > (
+                player_war,
+                player_ops,
+                player_name,
+            )
+        )
     percentile = 1.0 - ((rank - 1) / max(total, 1))
     leader_war = float(qualified[0].get("predicted_war_final") or 0)
-    player_war = float(player_row.get("predicted_war_final") or 0)
     war_ratio = player_war / leader_war if leader_war > 0 else 0.0
 
     mvp_prob = ((percentile ** 2.6) * 0.42) + (max(0.0, war_ratio - 0.7) * 0.30)
@@ -110,9 +179,351 @@ def _estimate_hitter_projection(
     return enriched
 
 
+def _estimate_hitter_pace_projection(
+    current_agg: dict[str, Any] | None,
+    current_row: dict[str, Any] | None,
+    season: int,
+) -> dict[str, Any] | None:
+    if not current_agg:
+        return None
+
+    team = str(current_agg.get("team") or current_row.get("team") if current_row else "").strip()
+    team_games = repo.max_team_games(season, team) if team else 0
+    season_games = 144
+    progress = float(team_games) / float(season_games) if team_games > 0 else 0.0
+    progress = _clamp(progress, 0.0, 1.0)
+    pace_factor = float(season_games) / float(team_games) if team_games > 0 else 1.0
+    pace_factor = _clamp(pace_factor, 1.0, 2.5)
+
+    confidence_score = _clamp(0.35 + (progress * 0.55), 0.35, 0.9)
+    if confidence_score >= 0.78:
+        confidence_level = "HIGH"
+    elif confidence_score >= 0.58:
+        confidence_level = "MEDIUM"
+    else:
+        confidence_level = "LOW"
+
+    pa_to_date = float(current_agg.get("PA") or 0)
+    hr_to_date = float(current_agg.get("HR") or 0)
+    hits_to_date = float(current_agg.get("H") or 0)
+    rbi_to_date = float(current_agg.get("RBI") or 0)
+    ops_to_date = float(current_agg.get("OPS") or 0)
+    war_to_date = float((current_row or {}).get("WAR") or 0)
+    latest_prediction_date = repo.latest_prediction_date(season) if repo.table_exists("hitter_predictions") else None
+
+    return {
+        "player_name": current_agg.get("player_name"),
+        "team": team,
+        "as_of_date": latest_prediction_date or current_agg.get("latest_game_date"),
+        "model_source": "PACE_BASED_HITTER",
+        "confidence_score": round(confidence_score, 4),
+        "confidence_level": confidence_level,
+        "pa_to_date": round(pa_to_date, 1),
+        "predicted_hr_final": round(hr_to_date * pace_factor),
+        "predicted_ops_final": round(ops_to_date, 3),
+        "predicted_war_final": round(war_to_date * pace_factor, 3),
+        "predicted_hits_final": round(hits_to_date * pace_factor),
+        "predicted_rbi_final": round(rbi_to_date * pace_factor),
+    }
+
+
+def _estimate_pitcher_projection(current_agg: dict[str, Any] | None, season: int) -> dict[str, Any] | None:
+    if not current_agg:
+        return None
+
+    team = str(current_agg.get("team") or "").strip()
+    team_games = repo.max_team_games(season, team) if team else 0
+    season_games = 144
+    progress = float(team_games) / float(season_games) if team_games > 0 else 0.0
+    progress = _clamp(progress, 0.0, 1.0)
+    pace_factor = float(season_games) / float(team_games) if team_games > 0 else 1.0
+    pace_factor = _clamp(pace_factor, 1.0, 2.5)
+
+    confidence_score = _clamp(0.35 + (progress * 0.55), 0.35, 0.9)
+    if confidence_score >= 0.78:
+        confidence_level = "HIGH"
+    elif confidence_score >= 0.58:
+        confidence_level = "MEDIUM"
+    else:
+        confidence_level = "LOW"
+
+    outs_to_date = float(current_agg.get("OUTS") or 0)
+    ip_to_date = float(current_agg.get("IP") or 0)
+    wins_to_date = float(current_agg.get("W") or 0)
+    losses_to_date = float(current_agg.get("L") or 0)
+    saves_to_date = float(current_agg.get("SV") or 0)
+    holds_to_date = float(current_agg.get("HLD") or 0)
+    so_to_date = float(current_agg.get("SO") or 0)
+    h_to_date = float(current_agg.get("H") or 0)
+    bb_to_date = float(current_agg.get("BB") or 0)
+    er_to_date = float(current_agg.get("ER") or 0)
+
+    projected_outs = round(outs_to_date * pace_factor)
+    projected_ip = round(projected_outs / 3.0, 1)
+    projected_wins = round(wins_to_date * pace_factor)
+    projected_losses = round(losses_to_date * pace_factor)
+    projected_saves = round(saves_to_date * pace_factor)
+    projected_holds = round(holds_to_date * pace_factor)
+    projected_so = round(so_to_date * pace_factor)
+    projected_h = round(h_to_date * pace_factor)
+    projected_bb = round(bb_to_date * pace_factor)
+    projected_er = round(er_to_date * pace_factor)
+
+    projected_era = float(current_agg.get("ERA") or 0)
+    projected_whip = float(current_agg.get("WHIP") or 0)
+    projected_k9 = float(current_agg.get("K9") or 0)
+    projected_bb9 = float(current_agg.get("BB9") or 0)
+    projected_kbb = float(current_agg.get("KBB") or 0) if current_agg.get("KBB") is not None else None
+
+    return {
+        "player_name": current_agg.get("player_name"),
+        "team": team,
+        "role": current_agg.get("role"),
+        "as_of_date": current_agg.get("latest_game_date"),
+        "model_source": "PACE_BASED_PITCHER",
+        "confidence_score": round(confidence_score, 4),
+        "confidence_level": confidence_level,
+        "wins_to_date": int(round(wins_to_date)),
+        "losses_to_date": int(round(losses_to_date)),
+        "saves_to_date": int(round(saves_to_date)),
+        "holds_to_date": int(round(holds_to_date)),
+        "innings_to_date": round(ip_to_date, 1),
+        "predicted_wins_final": int(projected_wins),
+        "predicted_losses_final": int(projected_losses),
+        "predicted_saves_final": int(projected_saves),
+        "predicted_holds_final": int(projected_holds),
+        "predicted_ip_final": projected_ip,
+        "predicted_so_final": int(projected_so),
+        "predicted_h_final": int(projected_h),
+        "predicted_bb_final": int(projected_bb),
+        "predicted_er_final": int(projected_er),
+        "predicted_era_final": round(projected_era, 3),
+        "predicted_whip_final": round(projected_whip, 3),
+        "predicted_k9_final": round(projected_k9, 2),
+        "predicted_bb9_final": round(projected_bb9, 2),
+        "predicted_kbb_final": round(projected_kbb, 2) if projected_kbb is not None else None,
+    }
+
+
+def _estimate_pitcher_totals_projection(
+    current_row: dict[str, Any] | None,
+    season: int,
+) -> dict[str, Any] | None:
+    if not current_row:
+        return None
+
+    latest_prediction_date = repo.pitcher_latest_prediction_date(season) if repo.table_exists("pitcher_predictions") else None
+    return {
+        "player_name": current_row.get("player_name"),
+        "team": current_row.get("team"),
+        "role": current_row.get("role"),
+        "as_of_date": latest_prediction_date or repo.logs_latest_game_date(season),
+        "model_source": "SEASON_TOTALS_FALLBACK",
+        "confidence_score": 0.9,
+        "confidence_level": "HIGH",
+        "wins_to_date": int(round(float(current_row.get("W") or 0))),
+        "losses_to_date": int(round(float(current_row.get("L") or 0))),
+        "saves_to_date": int(round(float(current_row.get("SV") or 0))),
+        "holds_to_date": int(round(float(current_row.get("HLD") or 0))),
+        "innings_to_date": round(float(current_row.get("IP") or 0), 1),
+        "predicted_wins_final": int(round(float(current_row.get("W") or 0))),
+        "predicted_losses_final": int(round(float(current_row.get("L") or 0))),
+        "predicted_saves_final": int(round(float(current_row.get("SV") or 0))),
+        "predicted_holds_final": int(round(float(current_row.get("HLD") or 0))),
+        "predicted_ip_final": round(float(current_row.get("IP") or 0), 1),
+        "predicted_so_final": int(round(float(current_row.get("SO") or 0))),
+        "predicted_h_final": int(round(float(current_row.get("H") or 0))),
+        "predicted_bb_final": int(round(float(current_row.get("BB") or 0))),
+        "predicted_er_final": int(round(float(current_row.get("ER") or 0))),
+        "predicted_era_final": round(float(current_row.get("ERA") or 0), 3),
+        "predicted_whip_final": round(float(current_row.get("WHIP") or 0), 3),
+        "predicted_k9_final": round(float(current_row.get("K9") or 0), 2),
+        "predicted_bb9_final": round(float(current_row.get("BB9") or 0), 2),
+        "predicted_kbb_final": round(float(current_row.get("KBB") or 0), 2) if current_row.get("KBB") is not None else None,
+        "predicted_war_final": round(float(current_row.get("WAR") or 0), 3),
+        "ip_to_date": round(float(current_row.get("IP") or 0), 3),
+        "so_to_date": float(current_row.get("SO") or 0),
+    }
+
+
+def _estimate_pitcher_awards(
+    latest_prediction: dict[str, Any] | None,
+    season: int,
+) -> dict[str, Any] | None:
+    if not latest_prediction:
+        return latest_prediction
+
+    enriched = dict(latest_prediction)
+    # Award probabilities should come only from actual pitcher model predictions.
+    # Low-sample or fallback-only rows get a truthful zero instead of a heuristic estimate.
+    ip_to_date = float(enriched.get("ip_to_date") or enriched.get("innings_to_date") or 0)
+    role_hint = str(enriched.get("role") or "").strip().upper()
+    role_min_ip = 10.0 if role_hint == "RP" else 20.0
+    model_source = str(enriched.get("model_source") or "").strip().upper()
+    if ip_to_date < role_min_ip or model_source in {"", "PACE_BASED_PITCHER", "SEASON_TOTALS_FALLBACK"}:
+        enriched["mvp_probability"] = 0.0
+        enriched["golden_glove_probability"] = 0.0
+        return enriched
+
+    as_of_date = str(enriched.get("as_of_date") or "").strip()
+    if not as_of_date:
+        enriched["mvp_probability"] = 0.0
+        enriched["golden_glove_probability"] = 0.0
+        return enriched
+
+    comparison_rows = repo.pitcher_prediction_rows_for_as_of(season=season, as_of_date=as_of_date)
+    if not comparison_rows:
+        enriched["mvp_probability"] = 0.0
+        enriched["golden_glove_probability"] = 0.0
+        return enriched
+
+    def _ip_threshold(row: dict[str, Any]) -> float:
+        role = str(row.get("role") or "").strip().upper()
+        return 10.0 if role == "RP" else 20.0
+
+    qualified = [
+        row for row in comparison_rows
+        if float(row.get("ip_to_date") or 0) >= _ip_threshold(row)
+    ]
+    if not qualified:
+        enriched["mvp_probability"] = 0.0
+        enriched["golden_glove_probability"] = 0.0
+        return enriched
+
+    qualified.sort(
+        key=lambda row: (
+            -float(row.get("predicted_war_final") or 0),
+            float(row.get("predicted_era_final") or 99.0),
+            float(row.get("predicted_whip_final") or 99.0),
+            str(row.get("player_name") or ""),
+        )
+    )
+
+    player_name = str(enriched.get("player_name") or "").strip()
+    team = str(enriched.get("team") or "").strip()
+    player_row = next(
+        (
+            row for row in qualified
+            if str(row.get("player_name") or "").strip() == player_name
+            and str(row.get("team") or "").strip() == team
+        ),
+        None,
+    )
+    if not player_row:
+        player_row = next(
+            (row for row in qualified if str(row.get("player_name") or "").strip() == player_name),
+            None,
+        )
+    total = len(qualified)
+    pred_war = float(enriched.get("predicted_war_final") or (player_row or {}).get("predicted_war_final") or 0)
+    pred_era = float(enriched.get("predicted_era_final") or (player_row or {}).get("predicted_era_final") or 0)
+    pred_whip = float(enriched.get("predicted_whip_final") or (player_row or {}).get("predicted_whip_final") or 0)
+    if player_row:
+        rank = next(
+            (
+                index for index, row in enumerate(qualified, start=1)
+                if str(row.get("player_name") or "").strip() == str(player_row.get("player_name") or "").strip()
+                and str(row.get("team") or "").strip() == str(player_row.get("team") or "").strip()
+            ),
+            total,
+        )
+    else:
+        rank = 1 + sum(
+            1
+            for row in qualified
+            if (
+                float(row.get("predicted_war_final") or 0),
+                -(float(row.get("predicted_era_final") or 99.0)),
+                -(float(row.get("predicted_whip_final") or 99.0)),
+                str(row.get("player_name") or ""),
+            )
+            > (
+                pred_war,
+                -pred_era,
+                -pred_whip,
+                player_name,
+            )
+        )
+    percentile = 1.0 - ((rank - 1) / max(total, 1))
+
+    role = str(enriched.get("role") or (player_row or {}).get("role") or "").strip().upper()
+    pred_ip = float(enriched.get("predicted_ip_final") or 0)
+    pred_wins = float(enriched.get("predicted_wins_final") or 0)
+    pred_saves = float(enriched.get("predicted_saves_final") or 0)
+    pred_holds = float(enriched.get("predicted_holds_final") or 0)
+
+    leader_war = max(float(qualified[0].get("predicted_war_final") or 0), 0.01)
+    war_ratio = pred_war / leader_war if leader_war > 0 else 0.0
+
+    leader_era = min(
+        float(row.get("predicted_era_final") or 99.0)
+        for row in qualified
+        if float(row.get("predicted_era_final") or 0) > 0
+    ) if any(float(row.get("predicted_era_final") or 0) > 0 for row in qualified) else 0.0
+    era_bonus = 0.0
+    if pred_era > 0 and leader_era > 0:
+        era_bonus = _clamp((leader_era / pred_era), 0.0, 1.15)
+
+    if role == "RP":
+        player_save_hold = pred_saves + pred_holds
+        leader_save_hold = max(
+            max(
+                float(row.get("predicted_saves_final") or 0) + float(row.get("predicted_holds_final") or 0)
+                for row in qualified
+            ),
+            1.0,
+        )
+        leverage_ratio = player_save_hold / leader_save_hold
+        mvp_prob = (
+            (percentile ** 3.0) * 0.18
+            + (_clamp(war_ratio, 0.0, 1.2) * 0.22)
+            + (_clamp(leverage_ratio, 0.0, 1.2) * 0.12)
+            + (_clamp(era_bonus, 0.0, 1.15) * 0.08)
+        )
+        gg_prob = (
+            (percentile * 0.42)
+            + (_clamp(war_ratio, 0.0, 1.2) * 0.20)
+            + (_clamp(leverage_ratio, 0.0, 1.2) * 0.18)
+            + (_clamp(era_bonus, 0.0, 1.15) * 0.16)
+        )
+    else:
+        leader_ip = max(
+            max(float(row.get("predicted_ip_final") or 0) for row in qualified),
+            1.0,
+        )
+        leader_wins = max(
+            max(float(row.get("predicted_wins_final") or 0) for row in qualified),
+            1.0,
+        )
+        ip_ratio = pred_ip / leader_ip
+        win_ratio = pred_wins / leader_wins
+        mvp_prob = (
+            (percentile ** 2.6) * 0.28
+            + (max(0.0, war_ratio - 0.65) * 0.34)
+            + (_clamp(ip_ratio, 0.0, 1.2) * 0.11)
+            + (_clamp(win_ratio, 0.0, 1.2) * 0.10)
+            + (_clamp(era_bonus, 0.0, 1.15) * 0.10)
+        )
+        gg_prob = (
+            (percentile * 0.44)
+            + (_clamp(war_ratio, 0.0, 1.2) * 0.18)
+            + (_clamp(ip_ratio, 0.0, 1.2) * 0.12)
+            + (_clamp(era_bonus, 0.0, 1.15) * 0.20)
+        )
+
+    enriched["mvp_probability"] = round(_clamp(mvp_prob, 0.005, 0.55), 4)
+    enriched["golden_glove_probability"] = round(_clamp(gg_prob, 0.03, 0.82), 4)
+    return enriched
+
+
 def _season_progress_min_pa(season: int, team: str = "") -> int:
     max_games = repo.max_team_games(season, team)
     return int(max_games * 3.1)
+
+
+def _season_progress_min_outs(season: int, team: str = "") -> int:
+    max_games = repo.max_team_games(season, team)
+    return int(max_games * 3)
 
 
 def _pick_effective_min_pa_for_leaderboard(
@@ -135,6 +546,31 @@ def _pick_effective_min_pa_for_leaderboard(
 
     for candidate in dedup:
         if repo.leaderboard_candidate_count(season=season, min_pa=candidate, team=team) >= min_count:
+            return candidate
+
+    return dedup[-1]
+
+
+def _pick_effective_min_outs_for_leaderboard(
+    season: int,
+    team: str,
+    base_min_outs: int,
+    auto_relax: bool,
+    min_count: int = 20,
+) -> int:
+    if not auto_relax:
+        return base_min_outs
+    if not repo.table_exists("pitcher_season_totals"):
+        return base_min_outs
+
+    candidates = [base_min_outs, 90, 60, 30, 15, 3]
+    dedup: list[int] = []
+    for candidate in candidates:
+        if candidate not in dedup:
+            dedup.append(candidate)
+
+    for candidate in dedup:
+        if repo.pitcher_leaderboard_candidate_count(season=season, min_outs=candidate, team=team) >= min_count:
             return candidate
 
     return dedup[-1]
@@ -204,6 +640,15 @@ def _resolve_player_name_from_id(player_id: str, season: int) -> str | None:
     for name in repo.player_distinct_names(None):
         if _virtual_player_id(name) == pid:
             return name
+
+    if repo.table_exists("pitcher_season_totals"):
+        for name in repo.pitcher_distinct_names(season):
+            if _virtual_player_id(name) == pid:
+                return name
+
+        for name in repo.pitcher_distinct_names(None):
+            if _virtual_player_id(name) == pid:
+                return name
 
     return None
 
@@ -323,9 +768,8 @@ def home_summary(request):
         top_avg = repo.top_avg_rows(season, effective_min_pa, 5)
         top_ops = repo.top_ops_rows(season, effective_min_pa, 5)
         top_hr = repo.top_hr_rows(season, effective_min_pa, 5)
-        # Pitcher dataset is not available yet in this MVP.
-        # Keep ERA card empty on the frontend until pitcher stats are integrated.
-        top_era: list[dict[str, Any]] = []
+        effective_min_outs = _season_progress_min_outs(season)
+        top_era = repo.top_era_rows(season, 5, min_outs=max(effective_min_outs, 15))
         top_war = repo.top_war_rows(season, effective_min_pa, 5)
 
         standings_as_of = repo.logs_latest_game_date(season)
@@ -350,12 +794,14 @@ def home_summary(request):
                     "era_top5": top_era,
                     "war_top5": top_war,
                 },
+                "effective_min_ip": round(effective_min_outs / 3.0, 1),
                 "standings_preview": {
                     "as_of_date": standings_as_of,
                     "rows": standings_preview,
                 },
                 "notes": [
                     "standings are derived from Naver-based hitter_game_logs by game result aggregation",
+                    "pitcher ERA leaderboard is derived from Naver-based pitcher_game_logs when pitcher_season_totals exists",
                 ],
             }
         )
@@ -369,10 +815,108 @@ def leaderboard(request):
     season = requested_season
     mode = "SEASON_MATCH"
     metric = str(request.GET.get("metric", "OPS")).upper().strip()
+    player_type = str(request.GET.get("player_type", "hitter")).strip().lower()
     min_pa_raw = request.GET.get("min_pa")
+    min_ip_raw = request.GET.get("min_ip")
     team = str(request.GET.get("team", "")).strip()
     limit = _parse_int(request.GET.get("limit"), 20, min_value=1, max_value=200)
     offset = _parse_int(request.GET.get("offset"), 0, min_value=0, max_value=100000)
+
+    if player_type not in {"hitter", "pitcher"}:
+        player_type = "hitter"
+
+    if player_type == "pitcher":
+        missing = _missing_required_tables(["pitcher_season_totals"])
+        if missing:
+            return _error_json("missing_table", f"required table missing: {', '.join(missing)}", 503)
+
+        if repo.pitcher_leaderboard_candidate_count(season=season, min_outs=0, team=team) == 0:
+            return JsonResponse(
+                {
+                    "season": requested_season,
+                    "requested_season": requested_season,
+                    "effective_season": None,
+                    "mode": "NO_DATA",
+                    "player_type": "pitcher",
+                    "metric": metric,
+                    "requested_min_ip": 0,
+                    "effective_min_ip": 0,
+                    "effective_min_outs": 0,
+                    "min_ip_policy": "AUTO_BY_SEASON_PROGRESS",
+                    "team": team or None,
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                    "rows": [],
+                }
+            )
+
+        if min_ip_raw is None or str(min_ip_raw).strip() == "":
+            requested_min_outs = _season_progress_min_outs(season, team)
+            min_ip_policy = "AUTO_BY_SEASON_PROGRESS"
+            min_outs = _pick_effective_min_outs_for_leaderboard(
+                season=season,
+                team=team,
+                base_min_outs=requested_min_outs,
+                auto_relax=False,
+                min_count=20,
+            )
+        else:
+            requested_min_ip = float(request.GET.get("min_ip") or 0)
+            requested_min_outs = int(round(requested_min_ip * 3))
+            min_outs = requested_min_outs
+            min_ip_policy = "MANUAL"
+
+        allowed_pitcher_metrics = {
+            "ERA": "ERA",
+            "WHIP": "WHIP",
+            "K9": "K9",
+            "BB9": "BB9",
+            "KBB": "KBB",
+            "SO": "SO",
+            "W": "W",
+            "SV": "SV",
+            "HLD": "HLD",
+            "IP": "IP",
+        }
+        order_metric = allowed_pitcher_metrics.get(metric, "ERA")
+
+        try:
+            total = repo.pitcher_leaderboard_total(season=season, min_outs=min_outs, team=team)
+            rows = repo.pitcher_leaderboard_rows(
+                season=season,
+                min_outs=min_outs,
+                order_metric=order_metric,
+                limit=limit,
+                offset=offset,
+                team=team,
+            )
+            player_id_map = _preferred_player_ids([str(r.get("player_name") or "") for r in rows])
+            for row in rows:
+                name = str(row.get("player_name") or "").strip()
+                row["player_id"] = player_id_map.get(name, _virtual_player_id(name))
+
+            return JsonResponse(
+                {
+                    "season": season,
+                    "requested_season": requested_season,
+                    "effective_season": season,
+                    "mode": mode,
+                    "player_type": "pitcher",
+                    "metric": order_metric,
+                    "requested_min_ip": round(requested_min_outs / 3.0, 1),
+                    "effective_min_ip": round(min_outs / 3.0, 1),
+                    "effective_min_outs": min_outs,
+                    "min_ip_policy": min_ip_policy,
+                    "team": team or None,
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                    "rows": rows,
+                }
+            )
+        except DatabaseError:
+            return _error_json("database_error", "failed to load pitcher leaderboard", 500)
 
     missing = _missing_required_tables(["hitter_season_totals"])
     if missing:
@@ -385,6 +929,7 @@ def leaderboard(request):
                 "requested_season": requested_season,
                 "effective_season": None,
                 "mode": "NO_DATA",
+                "player_type": "hitter",
                 "metric": metric,
                 "requested_min_pa": 0,
                 "effective_min_pa": 0,
@@ -444,6 +989,7 @@ def leaderboard(request):
                 "requested_season": requested_season,
                 "effective_season": season,
                 "mode": mode,
+                "player_type": "hitter",
                 "metric": order_metric,
                 "requested_min_pa": requested_min_pa,
                 "effective_min_pa": min_pa,
@@ -510,6 +1056,8 @@ def player_search(request):
 @require_GET
 def player_detail(request, player_id: str):
     season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
+    raw_player_type = str(request.GET.get("player_type", "")).strip().lower()
+    player_type = raw_player_type if raw_player_type in {"hitter", "pitcher"} else ""
     pid = player_id.strip()
 
     target_team = None
@@ -525,6 +1073,108 @@ def player_detail(request, player_id: str):
 
     recent_n = _parse_int(request.GET.get("recent_n"), 10, min_value=1, max_value=60)
 
+    def _build_pitcher_response() -> JsonResponse:
+        missing = _missing_required_tables(["pitcher_season_totals"])
+        if missing:
+            return _error_json("missing_table", f"required table missing: {', '.join(missing)}", 503)
+
+        try:
+            pitcher_name = name
+            season_rows = repo.pitcher_player_season_rows(pitcher_name, team=target_team)
+            if not season_rows:
+                compact_name = _compact_player_name(pitcher_name)
+                if compact_name and compact_name != pitcher_name:
+                    compact_rows = repo.pitcher_player_season_rows(compact_name, team=target_team)
+                    if compact_rows:
+                        pitcher_name = compact_name
+                        season_rows = compact_rows
+            if not season_rows:
+                return _error_json(
+                    "player_not_found",
+                    f"player not found: {pitcher_name}",
+                    404,
+                    {"player_id": pid, "player_name": pitcher_name, "player_type": "pitcher"},
+                )
+
+            current_rows = [row for row in season_rows if int(row.get("season") or 0) == season]
+            monthly = []
+            current_agg = None
+            latest_prediction = None
+            totals_prediction = current_rows[0] if current_rows else (season_rows[0] if season_rows else None)
+            if repo.table_exists("pitcher_game_logs"):
+                monthly = repo.pitcher_player_monthly_rows(player_name=pitcher_name, season=season, team=target_team)
+                current_agg = repo.pitcher_player_current_aggregate(season=season, player_name=pitcher_name, team=target_team)
+                if current_agg is not None:
+                    current_agg["player_name"] = pitcher_name
+                pace_prediction = _estimate_pitcher_projection(current_agg=current_agg, season=season)
+                if repo.table_exists("pitcher_predictions"):
+                    latest_prediction = repo.pitcher_player_latest_prediction(
+                        season=season,
+                        player_name=pitcher_name,
+                        team=target_team,
+                    )
+                if latest_prediction is None:
+                    latest_prediction = pace_prediction
+                elif pace_prediction:
+                    merged_prediction = dict(pace_prediction)
+                    merged_prediction.update({k: v for k, v in latest_prediction.items() if v is not None})
+                    latest_prediction = merged_prediction
+            totals_projection = _estimate_pitcher_totals_projection(
+                current_row=totals_prediction,
+                season=season,
+            )
+            if latest_prediction is None:
+                if totals_projection and pace_prediction:
+                    merged_prediction = dict(totals_projection)
+                    for key, value in pace_prediction.items():
+                        if value is not None and key not in {"as_of_date", "model_source", "confidence_score", "confidence_level"}:
+                            merged_prediction[key] = value
+                    latest_prediction = merged_prediction
+                else:
+                    latest_prediction = totals_projection or pace_prediction
+            elif totals_projection:
+                merged_prediction = dict(totals_projection)
+                merged_prediction.update({k: v for k, v in latest_prediction.items() if v is not None})
+                latest_prediction = merged_prediction
+            if latest_prediction and not latest_prediction.get("player_name"):
+                latest_prediction["player_name"] = pitcher_name
+            latest_prediction = _estimate_pitcher_awards(
+                latest_prediction=latest_prediction,
+                season=season,
+                )
+
+            teams_in_season = sorted(
+                {
+                    str(row.get("team") or "").strip()
+                    for row in current_rows
+                    if str(row.get("team") or "").strip()
+                }
+            )
+
+            return JsonResponse(
+                {
+                    "season": season,
+                    "player_type": "pitcher",
+                    "player_name": pitcher_name,
+                    "player_id": pid,
+                    "profile": {
+                        "teams_in_season": teams_in_season,
+                        "birth_date": None,
+                        "bats_throws": None,
+                    },
+                    "season_aggregate": current_agg,
+                    "season_rows": current_rows or season_rows[:1],
+                    "season_by_year": season_rows,
+                    "monthly_splits": monthly,
+                    "latest_prediction": latest_prediction,
+                }
+            )
+        except DatabaseError:
+            return _error_json("database_error", "failed to load pitcher detail", 500)
+
+    if player_type == "pitcher":
+        return _build_pitcher_response()
+
     missing = _missing_required_tables(["hitter_season_totals"])
     if missing:
         return _error_json("missing_table", f"required table missing: {', '.join(missing)}", 503)
@@ -539,6 +1189,8 @@ def player_detail(request, player_id: str):
                     name = compact_name
                     season_rows = compact_rows
         if not season_rows:
+            if player_type != "hitter" and repo.table_exists("pitcher_season_totals"):
+                return _build_pitcher_response()
             return _error_json(
                 "player_not_found",
                 f"player not found: {name}",
@@ -619,6 +1271,23 @@ def player_detail(request, player_id: str):
             ),
             team=target_team,
         )
+        if current_agg is not None:
+            current_agg["player_name"] = name
+            if target_team:
+                current_agg["team"] = target_team
+            elif current_rows:
+                current_agg["team"] = current_rows[0].get("team")
+        pace_prediction = _estimate_hitter_pace_projection(
+            current_agg=current_agg,
+            current_row=current_rows[0] if current_rows else (season_rows[0] if season_rows else None),
+            season=season,
+        )
+        if latest_prediction is None:
+            latest_prediction = pace_prediction
+        elif pace_prediction:
+            merged_prediction = dict(pace_prediction)
+            merged_prediction.update({k: v for k, v in latest_prediction.items() if v is not None})
+            latest_prediction = merged_prediction
         latest_prediction = _estimate_hitter_projection(
             latest_prediction=latest_prediction,
             current_agg=current_agg,
@@ -810,6 +1479,16 @@ def team_schedule(request, team: str):
                 merged["team_score"] = src.get("team_score")
                 merged["opp_score"] = src.get("opp_score")
                 merged["opp_team"] = src.get("opp_team")
+
+            # Derived status fields for the frontend
+            sc = _classify_status(merged["status"], merged["result"])
+            merged["status_category"] = sc
+            merged["result_state"] = (
+                "played"          if merged["result"] is not None
+                else "not_played" if sc in ("cancelled", "suspended", "scheduled")
+                else "missing_result" if sc == "finished"
+                else "not_played"
+            )
             items.append(merged)
 
         return JsonResponse(
