@@ -1277,19 +1277,38 @@ def team_summary(season: int, team: str) -> dict[str, Any] | None:
 
 
 def team_leaders_ops(season: int, team: str, min_pa: int, limit: int = 10) -> list[dict[str, Any]]:
+    if table_exists("statiz_players"):
+        return query_all(
+            """
+            SELECT 
+                h.player_name, 
+                MAX(sp.birth_date) AS birth_date,
+                SUM(h.PA) AS PA, 
+                SUM(h.H) AS H, 
+                SUM(h.HR) AS HR, 
+                SUM(h.RBI) AS RBI, 
+                MAX(h.OPS) AS OPS
+            FROM hitter_season_totals h
+            LEFT JOIN statiz_players sp ON 
+                (sp.player_name = h.player_name OR sp.player_name LIKE '%% ' || h.player_name)
+            WHERE h.season = %s AND h.team = %s AND h.PA >= %s
+            GROUP BY h.player_name
+            ORDER BY MAX(h.OPS) DESC, SUM(h.PA) DESC
+            LIMIT %s
+            """,
+            (season, team, min_pa, limit),
+        )
     return query_all(
         """
         SELECT 
-            h.player_name, 
-            MAX(sp.birth_date) AS birth_date,
+            h.player_name,
+            NULL AS birth_date,
             SUM(h.PA) AS PA, 
             SUM(h.H) AS H, 
             SUM(h.HR) AS HR, 
             SUM(h.RBI) AS RBI, 
             MAX(h.OPS) AS OPS
         FROM hitter_season_totals h
-        LEFT JOIN statiz_players sp ON 
-            (sp.player_name = h.player_name OR sp.player_name LIKE '%% ' || h.player_name)
         WHERE h.season = %s AND h.team = %s AND h.PA >= %s
         GROUP BY h.player_name
         ORDER BY MAX(h.OPS) DESC, SUM(h.PA) DESC
@@ -1300,19 +1319,38 @@ def team_leaders_ops(season: int, team: str, min_pa: int, limit: int = 10) -> li
 
 
 def team_leaders_hr(season: int, team: str, min_pa: int, limit: int = 10) -> list[dict[str, Any]]:
+    if table_exists("statiz_players"):
+        return query_all(
+            """
+            SELECT 
+                h.player_name, 
+                MAX(sp.birth_date) AS birth_date,
+                SUM(h.PA) AS PA, 
+                SUM(h.H) AS H, 
+                SUM(h.HR) AS HR, 
+                SUM(h.RBI) AS RBI, 
+                MAX(h.OPS) AS OPS
+            FROM hitter_season_totals h
+            LEFT JOIN statiz_players sp ON 
+                (sp.player_name = h.player_name OR sp.player_name LIKE '%% ' || h.player_name)
+            WHERE h.season = %s AND h.team = %s AND h.PA >= %s
+            GROUP BY h.player_name
+            ORDER BY SUM(h.HR) DESC, SUM(h.PA) DESC
+            LIMIT %s
+            """,
+            (season, team, min_pa, limit),
+        )
     return query_all(
         """
         SELECT 
-            h.player_name, 
-            MAX(sp.birth_date) AS birth_date,
+            h.player_name,
+            NULL AS birth_date,
             SUM(h.PA) AS PA, 
             SUM(h.H) AS H, 
             SUM(h.HR) AS HR, 
             SUM(h.RBI) AS RBI, 
             MAX(h.OPS) AS OPS
         FROM hitter_season_totals h
-        LEFT JOIN statiz_players sp ON 
-            (sp.player_name = h.player_name OR sp.player_name LIKE '%% ' || h.player_name)
         WHERE h.season = %s AND h.team = %s AND h.PA >= %s
         GROUP BY h.player_name
         ORDER BY SUM(h.HR) DESC, SUM(h.PA) DESC
