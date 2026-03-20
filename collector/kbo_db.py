@@ -1,6 +1,6 @@
-import sqlite3
 from typing import Any, Dict, Iterable, List, Tuple
 
+from db_support import connect, executemany, is_postgres, table_columns
 
 DB_PATH = "kbo_stats.db"
 
@@ -44,7 +44,7 @@ PITCHER_REQUIRED_COLUMNS = {
 }
 
 
-def init_db(conn: sqlite3.Connection) -> None:
+def init_db(conn) -> None:
     # 기본 테이블 생성
     conn.execute(
         """
@@ -95,13 +95,11 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def migrate_columns(conn: sqlite3.Connection) -> None:
+def migrate_columns(conn) -> None:
     # 기존 테이블에 신규 컬럼을 안전하게 추가
-    existing = {
-        row[1] for row in conn.execute("PRAGMA table_info(hitter_game_logs)").fetchall()
-    }
+    existing = {col.lower() for col in table_columns(conn, "hitter_game_logs")}
     for col, col_def in REQUIRED_COLUMNS.items():
-        if col in existing:
+        if col.lower() in existing:
             continue
         # 숫자로 시작하는 컬럼명(예: 2B, 3B)은 반드시 따옴표로 감싸야 한다
         safe_col = f'"{col}"' if col[0].isdigit() else col
@@ -109,12 +107,10 @@ def migrate_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def migrate_pitcher_columns(conn: sqlite3.Connection) -> None:
-    existing = {
-        row[1] for row in conn.execute("PRAGMA table_info(pitcher_game_logs)").fetchall()
-    }
+def migrate_pitcher_columns(conn) -> None:
+    existing = {col.lower() for col in table_columns(conn, "pitcher_game_logs")}
     for col, col_def in PITCHER_REQUIRED_COLUMNS.items():
-        if col in existing:
+        if col.lower() in existing:
             continue
         conn.execute(f"ALTER TABLE pitcher_game_logs ADD COLUMN {col} {col_def}")
     conn.commit()
@@ -146,31 +142,31 @@ def _row_to_values(row: Dict[str, Any]) -> Tuple[Any, ...]:
     )
 
 
-def insert_rows(
-    conn: sqlite3.Connection,
-    rows: Iterable[Dict[str, Any]],
-    upsert: bool = False,
-) -> int:
+def insert_rows(conn, rows: Iterable[Dict[str, Any]], upsert: bool = False) -> int:
     values: List[Tuple[Any, ...]] = [_row_to_values(r) for r in rows]
     if not values:
         return 0
 
-    cursor = conn.cursor()
     if not upsert:
-        cursor.executemany(
-        """
-        INSERT OR IGNORE INTO hitter_game_logs
+        sql = """
+        INSERT INTO hitter_game_logs
         (game_date, game_id, team, player_name, AB, H, HR, BB, SO, SH, "2B", "3B",
          HBP, SF, R, RBI, TB, PA, SB, CS, GDP)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        values,
-    )
+        """
+        if is_postgres(conn):
+            sql += " ON CONFLICT (game_id, team, player_name) DO NOTHING"
+        else:
+            sql = sql.replace("INSERT INTO", "INSERT OR IGNORE INTO", 1)
+        before = getattr(conn, "total_changes", 0)
+        executemany(conn, sql, values)
         conn.commit()
-        return cursor.rowcount
+        return (getattr(conn, "total_changes", 0) - before) if not is_postgres(conn) else len(values)
 
     # SQLite UPSERT: 기존 row가 있으면 확장 컬럼까지 업데이트
-    cursor.executemany(
+    before = getattr(conn, "total_changes", 0)
+    executemany(
+        conn,
         """
         INSERT INTO hitter_game_logs
         (game_date, game_id, team, player_name, AB, H, HR, BB, SO, SH, "2B", "3B",
@@ -198,7 +194,7 @@ def insert_rows(
         values,
     )
     conn.commit()
-    return cursor.rowcount
+    return (getattr(conn, "total_changes", 0) - before) if not is_postgres(conn) else len(values)
 
 
 def _pitcher_row_to_values(row: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -229,30 +225,30 @@ def _pitcher_row_to_values(row: Dict[str, Any]) -> Tuple[Any, ...]:
     )
 
 
-def insert_pitcher_rows(
-    conn: sqlite3.Connection,
-    rows: Iterable[Dict[str, Any]],
-    upsert: bool = False,
-) -> int:
+def insert_pitcher_rows(conn, rows: Iterable[Dict[str, Any]], upsert: bool = False) -> int:
     values: List[Tuple[Any, ...]] = [_pitcher_row_to_values(r) for r in rows]
     if not values:
         return 0
 
-    cursor = conn.cursor()
     if not upsert:
-        cursor.executemany(
-            """
-            INSERT OR IGNORE INTO pitcher_game_logs
+        sql = """
+            INSERT INTO pitcher_game_logs
             (game_date, game_id, team, player_name, role, W, L, SV, HLD, IP, OUTS, BF, NP,
              H, R, ER, BB, SO, HR, HBP, BK, WP, ERA)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            values,
-        )
+            """
+        if is_postgres(conn):
+            sql += " ON CONFLICT (game_id, team, player_name) DO NOTHING"
+        else:
+            sql = sql.replace("INSERT INTO", "INSERT OR IGNORE INTO", 1)
+        before = getattr(conn, "total_changes", 0)
+        executemany(conn, sql, values)
         conn.commit()
-        return cursor.rowcount
+        return (getattr(conn, "total_changes", 0) - before) if not is_postgres(conn) else len(values)
 
-    cursor.executemany(
+    before = getattr(conn, "total_changes", 0)
+    executemany(
+        conn,
         """
         INSERT INTO pitcher_game_logs
         (game_date, game_id, team, player_name, role, W, L, SV, HLD, IP, OUTS, BF, NP,
@@ -279,7 +275,6 @@ def insert_pitcher_rows(
             WP=excluded.WP,
             ERA=excluded.ERA
         """,
-        values,
     )
     conn.commit()
-    return cursor.rowcount
+    return (getattr(conn, "total_changes", 0) - before) if not is_postgres(conn) else len(values)
