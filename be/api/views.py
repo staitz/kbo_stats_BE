@@ -5,8 +5,14 @@ from typing import Any
 from django.db import DatabaseError
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET
+from zoneinfo import ZoneInfo
 
 from . import repository as repo
+
+
+KST = ZoneInfo("Asia/Seoul")
+KBO_REGULAR_SEASON_START_MONTH = 3
+KBO_REGULAR_SEASON_START_DAY = 28
 
 
 def _error_json(error: str, detail: str, status: int, extra: dict[str, Any] | None = None) -> JsonResponse:
@@ -29,10 +35,25 @@ def _parse_int(value: Any, default: int, min_value: int | None = None, max_value
 
 
 def _default_season() -> int:
+    now_kst = datetime.now(KST)
+    current_year = now_kst.year
+    has_season_started = (
+        now_kst.month > KBO_REGULAR_SEASON_START_MONTH
+        or (
+            now_kst.month == KBO_REGULAR_SEASON_START_MONTH
+            and now_kst.day >= KBO_REGULAR_SEASON_START_DAY
+        )
+    )
+    target_year = current_year if has_season_started else current_year - 1
+
+    latest_at_or_before = repo.logs_latest_season_at_or_before(target_year)
+    if latest_at_or_before:
+        return latest_at_or_before
+
     season = repo.default_season()
     if season:
         return season
-    return datetime.now().year
+    return target_year
 
 
 def _parse_yyyymmdd(value: str) -> datetime | None:
@@ -111,8 +132,12 @@ def _estimate_hitter_projection(
     # If the player has no model prediction row or the sample is too small,
     # keep the probabilities at zero instead of inferring them from fallbacks.
     pa_to_date = float(enriched.get("pa_to_date") or 0)
+    # Fallback: if hitter_predictions didn't store pa_to_date, use the
+    # actual PA from the season aggregate (hitter_season_totals).
+    if pa_to_date == 0 and current_agg:
+        pa_to_date = float(current_agg.get("PA") or 0)
     model_source = str(enriched.get("model_source") or "").strip().upper()
-    if pa_to_date < 80 or model_source in {"", "PACE_BASED_HITTER"}:
+    if pa_to_date < 80 or model_source == "":
         enriched["mvp_probability"] = 0.0
         enriched["golden_glove_probability"] = 0.0
         return enriched
@@ -129,10 +154,7 @@ def _estimate_hitter_projection(
         enriched["mvp_probability"] = 0.0
         enriched["golden_glove_probability"] = 0.0
         return enriched
-    if not qualified:
-        enriched["mvp_probability"] = 0.0
-        enriched["golden_glove_probability"] = 0.0
-        return enriched
+
 
     qualified.sort(
         key=lambda row: (
@@ -706,6 +728,7 @@ def standings(request):
                         "as_of_date": None,
                         "mode": "NO_DATA",
                         "rows": [],
+                        "available_seasons": repo.available_seasons(),
                     }
                 )
 
@@ -717,6 +740,7 @@ def standings(request):
                 "as_of_date": as_of_date,
                 "mode": "SEASON_MATCH" if season == requested_season else "PRESEASON_FALLBACK",
                 "rows": rows,
+                "available_seasons": repo.available_seasons(),
             }
         )
     except DatabaseError:
@@ -784,7 +808,7 @@ def home_summary(request):
         top_hr = repo.top_hr_rows(season, effective_min_pa, 5)
         effective_min_outs = _season_progress_min_outs(season)
         top_era = repo.top_era_rows(season, 5, min_outs=max(effective_min_outs, 15))
-        top_war = repo.top_war_rows(season, effective_min_pa, 5)
+        top_war = repo.top_combined_war_rows(season, effective_min_pa, effective_min_outs, 5)
 
         standings_as_of = repo.logs_latest_game_date(season)
         standings_preview = repo.computed_standings_rows(season)[:10]
@@ -1013,6 +1037,7 @@ def leaderboard(request):
                 "limit": limit,
                 "offset": offset,
                 "rows": rows,
+                "available_seasons": repo.available_seasons(),
             }
         )
     except DatabaseError:
@@ -1069,7 +1094,8 @@ def player_search(request):
 
 @require_GET
 def player_detail(request, player_id: str):
-    season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
+    requested_season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
+    season = requested_season
     raw_player_type = str(request.GET.get("player_type", "")).strip().lower()
     player_type = raw_player_type if raw_player_type in {"hitter", "pitcher"} else ""
     pid = player_id.strip()
@@ -1111,19 +1137,30 @@ def player_detail(request, player_id: str):
                 )
 
             current_rows = [row for row in season_rows if int(row.get("season") or 0) == season]
+            effective_season = season
+            if not current_rows and season_rows:
+                effective_season = int(season_rows[0].get("season") or season)
+                current_rows = [row for row in season_rows if int(row.get("season") or 0) == effective_season]
+
             monthly = []
             current_agg = None
             latest_prediction = None
             totals_prediction = current_rows[0] if current_rows else (season_rows[0] if season_rows else None)
             if repo.table_exists("pitcher_game_logs"):
-                monthly = repo.pitcher_player_monthly_rows(player_name=pitcher_name, season=season, team=target_team)
-                current_agg = repo.pitcher_player_current_aggregate(season=season, player_name=pitcher_name, team=target_team)
+                monthly = repo.pitcher_player_monthly_rows(player_name=pitcher_name, season=effective_season, team=target_team)
+                current_agg = repo.pitcher_player_current_aggregate(
+                    season=effective_season,
+                    player_name=pitcher_name,
+                    team=target_team,
+                )
+                if current_agg and not current_agg.get("latest_game_date"):
+                    current_agg = None
                 if current_agg is not None:
                     current_agg["player_name"] = pitcher_name
-                pace_prediction = _estimate_pitcher_projection(current_agg=current_agg, season=season)
+                pace_prediction = _estimate_pitcher_projection(current_agg=current_agg, season=effective_season)
                 if repo.table_exists("pitcher_predictions"):
                     latest_prediction = repo.pitcher_player_latest_prediction(
-                        season=season,
+                        season=effective_season,
                         player_name=pitcher_name,
                         team=target_team,
                     )
@@ -1135,7 +1172,7 @@ def player_detail(request, player_id: str):
                     latest_prediction = merged_prediction
             totals_projection = _estimate_pitcher_totals_projection(
                 current_row=totals_prediction,
-                season=season,
+                season=effective_season,
             )
             if latest_prediction is None:
                 if totals_projection and pace_prediction:
@@ -1154,7 +1191,7 @@ def player_detail(request, player_id: str):
                 latest_prediction["player_name"] = pitcher_name
             latest_prediction = _estimate_pitcher_awards(
                 latest_prediction=latest_prediction,
-                season=season,
+                season=effective_season,
                 )
 
             teams_in_season = sorted(
@@ -1167,7 +1204,9 @@ def player_detail(request, player_id: str):
 
             return JsonResponse(
                 {
-                    "season": season,
+                    "season": effective_season,
+                    "requested_season": requested_season,
+                    "effective_season": effective_season,
                     "player_type": "pitcher",
                     "player_name": pitcher_name,
                     "player_id": pid,
@@ -1213,21 +1252,25 @@ def player_detail(request, player_id: str):
             )
 
         current_rows = [row for row in season_rows if int(row.get("season") or 0) == season]
+        effective_season = season
+        if not current_rows and season_rows:
+            effective_season = int(season_rows[0].get("season") or season)
+            current_rows = [row for row in season_rows if int(row.get("season") or 0) == effective_season]
 
         latest_prediction = None
         if repo.table_exists("hitter_predictions"):
-            latest_prediction = repo.player_latest_prediction(season=season, player_name=name, team=target_team)
+            latest_prediction = repo.player_latest_prediction(season=effective_season, player_name=name, team=target_team)
 
         trend_rows: list[dict[str, Any]] = []
         if repo.table_exists("hitter_daily_snapshots"):
-            trend_rows = repo.player_trend_rows(season=season, player_name=name, team=target_team)
+            trend_rows = repo.player_trend_rows(season=effective_season, player_name=name, team=target_team)
 
         monthly: list[dict[str, Any]] = []
         vs_team: list[dict[str, Any]] = []
         recent_games: list[dict[str, Any]] = []
         if repo.table_exists("hitter_game_logs"):
             tb_expr = _safe_tb_expr("TB")
-            monthly = repo.player_monthly_rows(player_name=name, season=season, tb_expr=tb_expr, team=target_team)
+            monthly = repo.player_monthly_rows(player_name=name, season=effective_season, tb_expr=tb_expr, team=target_team)
             for row in monthly:
                 ab = int(row.get("AB") or 0)
                 h = int(row.get("H") or 0)
@@ -1244,7 +1287,12 @@ def player_detail(request, player_id: str):
                 row["SLG"] = round(slg, 4)  # pyre-ignore
                 row["OPS"] = round(obp + slg, 4)  # pyre-ignore
 
-            vs_team = repo.player_vs_team_rows(player_name=name, season=season, tb_expr=_safe_tb_expr("TB"), team=target_team)
+            vs_team = repo.player_vs_team_rows(
+                player_name=name,
+                season=effective_season,
+                tb_expr=_safe_tb_expr("TB"),
+                team=target_team,
+            )
             for row in vs_team:
                 ab = int(row.get("AB") or 0)
                 h = int(row.get("H") or 0)
@@ -1258,7 +1306,12 @@ def player_detail(request, player_id: str):
                 row["SLG"] = round(slg, 4)  # pyre-ignore
                 row["OPS"] = round(obp + slg, 4)  # pyre-ignore
 
-            recent_games = repo.player_recent_games_rows(player_name=name, season=season, recent_n=recent_n, team=target_team)
+            recent_games = repo.player_recent_games_rows(
+                player_name=name,
+                season=effective_season,
+                recent_n=recent_n,
+                team=target_team,
+            )
             for row in recent_games:
                 ab = int(row.get("AB") or 0)
                 h = int(row.get("H") or 0)
@@ -1273,7 +1326,7 @@ def player_detail(request, player_id: str):
                 row["OPS"] = round(obp + slg, 4)  # pyre-ignore
 
         current_agg = repo.player_current_aggregate(
-            season=season,
+            season=effective_season,
             player_name=name,
             ops_expr=_safe_ops_expr(
                 "COALESCE(SUM(AB),0)",
@@ -1285,6 +1338,15 @@ def player_detail(request, player_id: str):
             ),
             team=target_team,
         )
+        if current_agg and not current_agg.get("latest_game_date"):
+            # player_current_aggregate queries hitter_season_totals which has no
+            # game_date column. Inject it from the season-wide latest game date so
+            # pace projections have a valid as_of_date reference.
+            lgd = repo.logs_latest_game_date(effective_season)
+            if lgd:
+                current_agg["latest_game_date"] = lgd
+            else:
+                current_agg = None  # No game data exists at all
         if current_agg is not None:
             current_agg["player_name"] = name
             if target_team:
@@ -1294,7 +1356,7 @@ def player_detail(request, player_id: str):
         pace_prediction = _estimate_hitter_pace_projection(
             current_agg=current_agg,
             current_row=current_rows[0] if current_rows else (season_rows[0] if season_rows else None),
-            season=season,
+            season=effective_season,
         )
         if latest_prediction is None:
             latest_prediction = pace_prediction
@@ -1305,7 +1367,7 @@ def player_detail(request, player_id: str):
         latest_prediction = _estimate_hitter_projection(
             latest_prediction=latest_prediction,
             current_agg=current_agg,
-            season=season,
+            season=effective_season,
         )
 
         kbreport_splits: dict[str, list[dict[str, Any]]] = {
@@ -1315,7 +1377,7 @@ def player_detail(request, player_id: str):
             "month": [],
         }
         if repo.table_exists("kbreport_hitter_splits"):
-            ext_rows = repo.player_kbreport_split_rows(season=season, player_name=name, team=target_team)
+            ext_rows = repo.player_kbreport_split_rows(season=effective_season, player_name=name, team=target_team)
             for row in ext_rows:
                 group = str(row.get("split_group") or "")
                 if group in kbreport_splits:
@@ -1327,7 +1389,9 @@ def player_detail(request, player_id: str):
             
         return JsonResponse(
             {
-                "season": season,
+                "season": effective_season,
+                "requested_season": requested_season,
+                "effective_season": effective_season,
                 "recent_n": recent_n,
                 "player_id": _preferred_player_id(name),
                 "player_name": name,
@@ -1391,7 +1455,7 @@ def team_detail(request, team: str):
                     "mode": "NO_DATA",
                     "detail": "아직 데이터가 없습니다.",
                     "summary": {},
-                    "leaders": {"ops_top10": [], "hr_top10": []},
+                    "leaders": {"ops_top10": [], "hr_top10": [], "era_top10": [], "k9_top10": []},
                     "monthly_trend": [],
                     "recent_games": [],
                     "h2h": [],
@@ -1406,6 +1470,9 @@ def team_detail(request, team: str):
 
         leaders_ops = repo.team_leaders_ops(season=season, team=name, min_pa=effective_min_pa, limit=10)
         leaders_hr = repo.team_leaders_hr(season=season, team=name, min_pa=effective_min_pa, limit=10)
+        effective_min_outs = _season_progress_min_outs(season, name)
+        leaders_era = repo.team_leaders_era(season=season, team=name, min_outs=max(effective_min_outs, 3), limit=10)
+        leaders_k9 = repo.team_leaders_k9(season=season, team=name, min_outs=max(effective_min_outs, 3), limit=10)
 
         monthly: list[dict[str, Any]] = []
         recent_games: list[dict[str, Any]] = []
@@ -1444,7 +1511,7 @@ def team_detail(request, team: str):
                 "effective_min_pa": effective_min_pa,
                 "min_pa_policy": min_pa_policy,
                 "summary": team_summary,
-                "leaders": {"ops_top10": leaders_ops, "hr_top10": leaders_hr},
+                "leaders": {"ops_top10": leaders_ops, "hr_top10": leaders_hr, "era_top10": leaders_era, "k9_top10": leaders_k9},
                 "monthly_trend": monthly,
                 "recent_games": recent_games,
                 "h2h": h2h,
