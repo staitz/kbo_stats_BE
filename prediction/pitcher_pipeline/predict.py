@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 from pathlib import Path
 
 import joblib
 import pandas as pd
 
+from db_support import connect_for_path
 from .config import AppConfig, get_config
 from .dataset import build_training_samples, prepare_model_matrix, upsert_predictions
 from .train import TARGET_MAP
@@ -114,7 +114,7 @@ def main() -> None:
     )
 
     if args.upsert_db:
-        with sqlite3.connect(args.db) as conn:
+        with connect_for_path(args.db) as conn:
             upserted = upsert_predictions(conn, predictions)
         print(f"upserted={upserted}")
 
