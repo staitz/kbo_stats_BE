@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import subprocess
 import sys
 import time
@@ -36,6 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from db_support import connect_for_path, execute, row_value
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -200,19 +200,19 @@ def stage_verify(season: int, as_of_date: str, mode: str, db_path: Path) -> dict
     if not db_path.exists():
         raise RuntimeError(f"DB not found: {db_path}")
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = connect_for_path(db_path)
     try:
         # Row count
-        row = conn.execute(
+        row = execute(
+            conn,
             """
             SELECT COUNT(*) AS cnt
             FROM hitter_predictions
             WHERE season = ? AND as_of_date = ? AND prediction_mode = ?
             """,
-            (season, as_of_date, mode),
+            [season, as_of_date, mode],
         ).fetchone()
-        row_count = int(row["cnt"] if row else 0)
+        row_count = int(row_value(row, "cnt", 0) or 0)
         _log(f"  [verify] row_count={row_count} (season={season} as_of={as_of_date} mode={mode})")
 
         if row_count == 0:
@@ -223,7 +223,8 @@ def stage_verify(season: int, as_of_date: str, mode: str, db_path: Path) -> dict
             )
 
         # Null check on key columns
-        null_row = conn.execute(
+        null_row = execute(
+            conn,
             """
             SELECT
                 SUM(CASE WHEN predicted_ops_final IS NULL THEN 1 ELSE 0 END) AS null_ops,
@@ -232,11 +233,11 @@ def stage_verify(season: int, as_of_date: str, mode: str, db_path: Path) -> dict
             FROM hitter_predictions
             WHERE season = ? AND as_of_date = ? AND prediction_mode = ?
             """,
-            (season, as_of_date, mode),
+            [season, as_of_date, mode],
         ).fetchone()
-        null_ops  = int(null_row["null_ops"]  or 0)
-        null_hr   = int(null_row["null_hr"]   or 0)
-        null_name = int(null_row["null_name"] or 0)
+        null_ops = int(row_value(null_row, "null_ops", 0) or 0)
+        null_hr = int(row_value(null_row, "null_hr", 0) or 0)
+        null_name = int(row_value(null_row, "null_name", 0) or 0)
 
         if null_ops or null_hr or null_name:
             _log(
@@ -247,7 +248,8 @@ def stage_verify(season: int, as_of_date: str, mode: str, db_path: Path) -> dict
             _log("  [verify] null check PASSED — no nulls in key columns")
 
         # Confidence distribution
-        conf_rows = conn.execute(
+        conf_rows = execute(
+            conn,
             """
             SELECT confidence_level, COUNT(*) AS cnt
             FROM hitter_predictions
@@ -255,9 +257,12 @@ def stage_verify(season: int, as_of_date: str, mode: str, db_path: Path) -> dict
             GROUP BY confidence_level
             ORDER BY confidence_level
             """,
-            (season, as_of_date, mode),
+            [season, as_of_date, mode],
         ).fetchall()
-        conf_dist = {r["confidence_level"]: int(r["cnt"]) for r in conf_rows}
+        conf_dist = {
+            str(row_value(r, "confidence_level", "")): int(row_value(r, "cnt", 0) or 0)
+            for r in conf_rows
+        }
         _log(f"  [verify] confidence_distribution={conf_dist}")
 
         return {
