@@ -8,10 +8,10 @@ Examples:
 
 import argparse
 import datetime as dt
-import sqlite3
 from collections import defaultdict, deque
 from typing import Any, Deque, Dict, List, Sequence, Tuple
 
+from db_support import connect_for_path, execute, executemany, is_postgres, row_value, table_columns, table_exists
 
 SOURCE_TABLE = "hitter_game_logs"
 SNAPSHOT_TABLE = "hitter_daily_snapshots"
@@ -135,22 +135,26 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-        (table_name,),
-    ).fetchone()
-    return bool(row)
+def _table_exists(conn, table_name: str) -> bool:
+    return table_exists(conn, table_name)
 
 
-def _fetch_columns(conn: sqlite3.Connection, table_name: str) -> List[str]:
-    rows = conn.execute(f"PRAGMA table_info({_qcol(table_name)})").fetchall()
-    return [str(r[1]) for r in rows]
+def _fetch_columns(conn, table_name: str) -> List[str]:
+    return table_columns(conn, table_name)
+
+
+def _lookup_col_name(col: str, existing_cols: Sequence[str]) -> str | None:
+    wanted = col.lower()
+    for existing in existing_cols:
+        if str(existing).lower() == wanted:
+            return str(existing)
+    return None
 
 
 def _src_col_expr(col: str, existing_cols: Sequence[str]) -> str:
-    if col in existing_cols:
-        return f"COALESCE({_qcol(col)}, 0)"
+    matched = _lookup_col_name(col, existing_cols)
+    if matched:
+        return f"COALESCE({_qcol(matched)}, 0)"
     return "0"
 
 
@@ -165,7 +169,7 @@ def _tb_adj_row_expr(existing_cols: Sequence[str]) -> str:
     return f"(CASE WHEN {tb} > 0 THEN {tb} ELSE {derived_tb} END)"
 
 
-def ensure_snapshot_table(conn: sqlite3.Connection) -> None:
+def ensure_snapshot_table(conn) -> None:
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {SNAPSHOT_TABLE} (
@@ -257,9 +261,9 @@ def ensure_snapshot_table(conn: sqlite3.Connection) -> None:
         "TB_adj_14": "INTEGER NOT NULL DEFAULT 0",
         "OPS_14": "REAL NOT NULL DEFAULT 0",
     }
-    existing = set(_fetch_columns(conn, SNAPSHOT_TABLE))
+    existing = {col.lower() for col in _fetch_columns(conn, SNAPSHOT_TABLE)}
     for col, col_def in required.items():
-        if col in existing:
+        if col.lower() in existing:
             continue
         safe = _qcol(col) if col[0].isdigit() else col
         conn.execute(f"ALTER TABLE {SNAPSHOT_TABLE} ADD COLUMN {safe} {col_def}")
@@ -273,7 +277,7 @@ def ensure_snapshot_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def resolve_as_of_dates(conn: sqlite3.Connection, args: argparse.Namespace) -> List[str]:
+def resolve_as_of_dates(conn, args: argparse.Namespace) -> List[str]:
     if args.as_of:
         return [args.as_of]
 
@@ -292,11 +296,12 @@ def resolve_as_of_dates(conn: sqlite3.Connection, args: argparse.Namespace) -> L
     WHERE {where}
     ORDER BY game_date ASC
     """
-    return [str(r[0]) for r in conn.execute(query, params).fetchall()]
+    rows = execute(conn, query, params).fetchall()
+    return [str(r["game_date"] if isinstance(r, dict) else r[0]) for r in rows]
 
 
 def fetch_daily_player_aggregates(
-    conn: sqlite3.Connection,
+    conn,
     season: str,
     end_date: str,
     team: str,
@@ -324,11 +329,14 @@ def fetch_daily_player_aggregates(
     ORDER BY game_date ASC, team ASC, player_name ASC
     """
 
-    cur = conn.execute(query, params)
+    cur = execute(conn, query, params)
     cols = [d[0] for d in cur.description]
     out: Dict[str, Dict[Tuple[str, str], Dict[str, int]]] = defaultdict(dict)
     for row in cur.fetchall():
-        data = {cols[i]: row[i] for i in range(len(cols))}
+        if isinstance(row, dict):
+            data = {col: row.get(col) for col in cols}
+        else:
+            data = {cols[i]: row[i] for i in range(len(cols))}
         game_date = str(data["game_date"])
         key = (str(data["team"]), str(data["player_name"]))
         stat = {"games": _safe_int(data.get("games", 0))}
@@ -444,7 +452,7 @@ def _build_snapshot_rows_for_date(
     return out
 
 
-def _upsert_snapshot_rows(conn: sqlite3.Connection, rows: List[Tuple[Any, ...]], upsert: bool) -> int:
+def _upsert_snapshot_rows(conn, rows: List[Tuple[Any, ...]], upsert: bool) -> int:
     if not rows:
         return 0
 
@@ -493,18 +501,19 @@ def _upsert_snapshot_rows(conn: sqlite3.Connection, rows: List[Tuple[Any, ...]],
     col_sql = ", ".join(_qcol(c) if c[0].isdigit() else c for c in cols)
     placeholders = ", ".join(["?"] * len(cols))
 
-    before = conn.total_changes
-    cur = conn.cursor()
+    before = getattr(conn, "total_changes", 0)
     if not upsert:
-        cur.executemany(
-            f"""
-            INSERT OR IGNORE INTO {SNAPSHOT_TABLE} ({col_sql})
+        sql = f"""
+            INSERT INTO {SNAPSHOT_TABLE} ({col_sql})
             VALUES ({placeholders})
-            """,
-            rows,
-        )
+            """
+        if is_postgres(conn):
+            sql += " ON CONFLICT (season, as_of_date, team, player_name) DO NOTHING"
+        else:
+            sql = sql.replace("INSERT INTO", "INSERT OR IGNORE INTO", 1)
+        executemany(conn, sql, rows)
         conn.commit()
-        return conn.total_changes - before
+        return (getattr(conn, "total_changes", 0) - before) if not is_postgres(conn) else len(rows)
 
     update_cols = [c for c in cols if c not in ("season", "as_of_date", "team", "player_name")]
     set_parts = []
@@ -513,7 +522,8 @@ def _upsert_snapshot_rows(conn: sqlite3.Connection, rows: List[Tuple[Any, ...]],
         rhs = f"excluded.{_qcol(c)}" if c[0].isdigit() else f"excluded.{c}"
         set_parts.append(f"{lhs}={rhs}")
     set_sql = ", ".join(set_parts)
-    cur.executemany(
+    executemany(
+        conn,
         f"""
         INSERT INTO {SNAPSHOT_TABLE} ({col_sql})
         VALUES ({placeholders})
@@ -523,15 +533,16 @@ def _upsert_snapshot_rows(conn: sqlite3.Connection, rows: List[Tuple[Any, ...]],
         rows,
     )
     conn.commit()
-    return conn.total_changes - before
+    return (getattr(conn, "total_changes", 0) - before) if not is_postgres(conn) else len(rows)
 
 
-def build_snapshots(conn: sqlite3.Connection, args: argparse.Namespace) -> Tuple[int, int]:
+def build_snapshots(conn, args: argparse.Namespace) -> Tuple[int, int]:
     if not _table_exists(conn, SOURCE_TABLE):
         raise RuntimeError(f"source table not found: {SOURCE_TABLE}")
 
     src_cols = _fetch_columns(conn, SOURCE_TABLE)
-    missing = [c for c in COUNT_COLS + ["TB"] if c not in src_cols]
+    src_lower = {col.lower() for col in src_cols}
+    missing = [c for c in COUNT_COLS + ["TB"] if c.lower() not in src_lower]
     if missing:
         print(f"[warn] missing source columns treated as 0: {', '.join(missing)}")
 
@@ -602,7 +613,7 @@ def build_snapshots(conn: sqlite3.Connection, args: argparse.Namespace) -> Tuple
     return processed_days, total_written
 
 
-def preview_top_ops(conn: sqlite3.Connection, season: int, as_of: str, limit: int, team: str) -> None:
+def preview_top_ops(conn, season: int, as_of: str, limit: int, team: str) -> None:
     if limit <= 0:
         return
     params: List[Any] = [season, as_of]
@@ -618,23 +629,32 @@ def preview_top_ops(conn: sqlite3.Connection, season: int, as_of: str, limit: in
     LIMIT ?
     """
     params.append(limit)
-    rows = conn.execute(query, params).fetchall()
+    rows = execute(conn, query, params).fetchall()
     print(f"[preview] season={season} as_of={as_of} top={limit}")
     if not rows:
         print("(no rows)")
         return
     print("team | player_name | games | PA | AB | H | HR | OPS | OPS_7 | OPS_14")
     for r in rows:
+        team_name = row_value(r, "team", r[0] if not isinstance(r, dict) else "")
+        player_name = row_value(r, "player_name", r[1] if not isinstance(r, dict) else "")
+        games = int(row_value(r, "games", r[2] if not isinstance(r, dict) else 0) or 0)
+        pa = int(row_value(r, "PA", r[3] if not isinstance(r, dict) else 0) or 0)
+        ab = int(row_value(r, "AB", r[4] if not isinstance(r, dict) else 0) or 0)
+        hits = int(row_value(r, "H", r[5] if not isinstance(r, dict) else 0) or 0)
+        hr = int(row_value(r, "HR", r[6] if not isinstance(r, dict) else 0) or 0)
+        ops = float(row_value(r, "OPS", r[7] if not isinstance(r, dict) else 0) or 0)
+        ops7 = float(row_value(r, "OPS_7", r[8] if not isinstance(r, dict) else 0) or 0)
+        ops14 = float(row_value(r, "OPS_14", r[9] if not isinstance(r, dict) else 0) or 0)
         print(
-            f"{r[0]} | {r[1]} | {int(r[2] or 0)} | {int(r[3] or 0)} | {int(r[4] or 0)} | "
-            f"{int(r[5] or 0)} | {int(r[6] or 0)} | {float(r[7] or 0):.3f} | "
-            f"{float(r[8] or 0):.3f} | {float(r[9] or 0):.3f}"
+            f"{team_name} | {player_name} | {games} | {pa} | {ab} | "
+            f"{hits} | {hr} | {ops:.3f} | {ops7:.3f} | {ops14:.3f}"
         )
 
 
 def main() -> None:
     args = parse_args()
-    conn = sqlite3.connect(args.db)
+    conn = connect_for_path(args.db)
     try:
         ensure_snapshot_table(conn)
         build_snapshots(conn, args)
