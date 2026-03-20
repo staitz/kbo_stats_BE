@@ -1,7 +1,6 @@
 import argparse
 import datetime as dt
 import json
-import sqlite3
 import time
 from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
@@ -15,6 +14,7 @@ from collector.kbo_db import (
     insert_pitcher_rows,
     migrate_pitcher_columns,
 )
+from db_support import connect, execute
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 
@@ -124,15 +124,16 @@ def _infer_teams_from_game_id(game_id: str) -> Tuple[str, str]:
     return TEAM_CODE_MAP.get(away_code, ""), TEAM_CODE_MAP.get(home_code, "")
 
 
-def _load_games_from_hitter_logs(conn: sqlite3.Connection, game_date: str) -> List[Tuple[str, str, str]]:
-    rows = conn.execute(
+def _load_games_from_hitter_logs(conn, game_date: str) -> List[Tuple[str, str, str]]:
+    rows = execute(
+        conn,
         """
         SELECT DISTINCT game_id
         FROM hitter_game_logs
         WHERE game_date = ?
         ORDER BY game_id
         """,
-        (game_date,),
+        [game_date],
     ).fetchall()
     out: List[Tuple[str, str, str]] = []
     for row in rows:
@@ -247,7 +248,7 @@ def collect_for_dates(
             "skipped_days": 0,
         }
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     init_db(conn)
     migrate_pitcher_columns(conn)
 
