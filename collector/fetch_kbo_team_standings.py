@@ -1,12 +1,12 @@
 import argparse
 import datetime as dt
 import re
-import sqlite3
 from typing import Any
 
 import pandas as pd
 import requests
 
+from db_support import connect_for_path, execute
 
 KBO_KR_STANDINGS_URL = "https://www.koreabaseball.com/record/teamrank/teamrankdaily.aspx"
 KBO_EN_STANDINGS_URL = "https://eng.koreabaseball.com/Standings/TeamStandings.aspx"
@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _init_table(conn: sqlite3.Connection) -> None:
+def _init_table(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS team_standings (
@@ -195,11 +195,59 @@ def main() -> None:
     season = int(args.season) if args.season else int(as_of_date[:4])
     now = dt.datetime.utcnow().isoformat() + "Z"
 
-    conn = sqlite3.connect(args.db)
+    conn = connect_for_path(args.db)
     try:
         _init_table(conn)
-        for row in rows:
-            conn.execute(
+        values = [
+            (
+                season,
+                as_of_date,
+                row["rank"],
+                row["team"],
+                row["games"],
+                row["wins"],
+                row["losses"],
+                row["draws"],
+                row["win_pct"],
+                row["gb"],
+                row["recent_10"],
+                row["streak"],
+                row["home_record"],
+                row["away_record"],
+                source_label,
+                KBO_KR_STANDINGS_URL if source_label.endswith("KR") else KBO_EN_STANDINGS_URL,
+                now,
+            )
+            for row in rows
+        ]
+        execute(
+            conn,
+            """
+            INSERT INTO team_standings
+            (season, as_of_date, rank, team, games, wins, losses, draws, win_pct, gb,
+             recent_10, streak, home_record, away_record, source, source_url, collected_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(season, as_of_date, team) DO UPDATE SET
+              rank=excluded.rank,
+              games=excluded.games,
+              wins=excluded.wins,
+              losses=excluded.losses,
+              draws=excluded.draws,
+              win_pct=excluded.win_pct,
+              gb=excluded.gb,
+              recent_10=excluded.recent_10,
+              streak=excluded.streak,
+              home_record=excluded.home_record,
+              away_record=excluded.away_record,
+              source=excluded.source,
+              source_url=excluded.source_url,
+              collected_at=excluded.collected_at
+            """,
+            values[0],
+        )
+        for value in values[1:]:
+            execute(
+                conn,
                 """
                 INSERT INTO team_standings
                 (season, as_of_date, rank, team, games, wins, losses, draws, win_pct, gb,
@@ -221,25 +269,7 @@ def main() -> None:
                   source_url=excluded.source_url,
                   collected_at=excluded.collected_at
                 """,
-                (
-                    season,
-                    as_of_date,
-                    row["rank"],
-                    row["team"],
-                    row["games"],
-                    row["wins"],
-                    row["losses"],
-                    row["draws"],
-                    row["win_pct"],
-                    row["gb"],
-                    row["recent_10"],
-                    row["streak"],
-                    row["home_record"],
-                    row["away_record"],
-                    source_label,
-                    KBO_KR_STANDINGS_URL if source_label.endswith("KR") else KBO_EN_STANDINGS_URL,
-                    now,
-                ),
+                value,
             )
         conn.commit()
         print(f"[ok] team_standings upserted={len(rows)} season={season} as_of_date={as_of_date} source={source_label}")
