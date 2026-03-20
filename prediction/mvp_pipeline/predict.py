@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
@@ -9,6 +8,7 @@ from datetime import datetime, timezone
 import joblib
 import pandas as pd
 
+from db_support import executemany, fetchall, is_postgres, table_columns
 from .config import AppConfig, get_config
 from .db import load_hitter_game_logs, open_db
 from .features import HitterFeatureBuilder
@@ -186,7 +186,7 @@ def save_predictions(pred_df: pd.DataFrame, output_path: str | Path) -> None:
         pred_df.to_csv(path, index=False)
 
 
-def ensure_predictions_table(conn: sqlite3.Connection) -> None:
+def ensure_predictions_table(conn) -> None:
     """Create hitter_predictions table (if not exists) and apply migration-safe column additions."""
     conn.execute(
         """
@@ -211,7 +211,7 @@ def ensure_predictions_table(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(hitter_predictions)").fetchall()}
+    existing = {str(col).lower() for col in table_columns(conn, "hitter_predictions")}
     # Migration-safe column additions
     migrations: list[str] = [
         "ALTER TABLE hitter_predictions ADD COLUMN predicted_war_final REAL NOT NULL DEFAULT 0",
@@ -219,7 +219,7 @@ def ensure_predictions_table(conn: sqlite3.Connection) -> None:
     ]
     for stmt in migrations:
         col = stmt.split("ADD COLUMN ")[1].split()[0]
-        if col not in existing:
+        if col.lower() not in existing:
             conn.execute(stmt)
     # Create covering unique index that includes prediction_mode (SQLite workaround for
     # tables created before this column was added — CREATE INDEX is idempotent with IF NOT EXISTS).
@@ -268,13 +268,13 @@ def upsert_predictions_to_db(
 
     if replace_existing and not pred_df.empty:
         as_of_values = sorted(set(str(v) for v in pred_df["as_of_date"].tolist()))
-        placeholders = ", ".join(["?"] * len(as_of_values))
+        placeholders = ", ".join([("%s" if is_postgres(conn) else "?")] * len(as_of_values))
         conn.execute(
             f"""
             DELETE FROM hitter_predictions
-            WHERE season = ?
-              AND model_version = ?
-              AND prediction_mode = ?
+            WHERE season = {("%s" if is_postgres(conn) else "?")}
+              AND model_version = {("%s" if is_postgres(conn) else "?")}
+              AND prediction_mode = {("%s" if is_postgres(conn) else "?")}
               AND as_of_date IN ({placeholders})
             """,
             [season, model_version, prediction_mode] + as_of_values,
@@ -308,8 +308,8 @@ def upsert_predictions_to_db(
             )
         )
 
-    cursor = conn.cursor()
-    cursor.executemany(
+    executemany(
+        conn,
         """
         INSERT INTO hitter_predictions (
             season, as_of_date, team, player_name,
