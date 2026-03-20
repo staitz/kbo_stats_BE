@@ -20,11 +20,11 @@ import argparse
 import json
 import os
 import pickle
-import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Tuple
 
+from db_support import connect_for_path, execute, table_columns as shared_table_columns, table_exists
 
 def safe_col(name: str) -> str:
     if not name:
@@ -34,9 +34,8 @@ def safe_col(name: str) -> str:
     return name
 
 
-def table_columns(conn: sqlite3.Connection, table: str) -> Dict[str, str]:
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return {row[1]: (row[2] or "") for row in rows}
+def table_columns(conn, table: str) -> Dict[str, str]:
+    return {col: "" for col in shared_table_columns(conn, table)}
 
 
 def is_numeric(col_type: str) -> bool:
@@ -133,12 +132,9 @@ def main() -> None:
         args.train_season = kst_year - 1
         print(f"train_season not provided; using {args.train_season} (KST year-1)")
 
-    conn = sqlite3.connect(args.db)
-    conn.row_factory = sqlite3.Row
+    conn = connect_for_path(args.db)
 
-    if not conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='hitter_training_rows'"
-    ).fetchone():
+    if not table_exists(conn, "hitter_training_rows"):
         raise SystemExit("Missing table: hitter_training_rows")
 
     cols = table_columns(conn, "hitter_training_rows")
@@ -171,7 +167,7 @@ def main() -> None:
         FROM hitter_training_rows
         WHERE train_season = ?
     """
-    rows = conn.execute(sql, (args.train_season,)).fetchall()
+    rows = execute(conn, sql, [args.train_season]).fetchall()
     if not rows:
         raise SystemExit("No training rows found.")
     print(f"Target mode: {target_mode} ({hr_target_col}, {ops_target_col})")
