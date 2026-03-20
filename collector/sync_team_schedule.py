@@ -1,8 +1,8 @@
 import argparse
 import datetime as dt
-import sqlite3
 
 from collector.kbo_api import fetch_month_schedule
+from db_support import connect_for_path, execute
 
 
 def parse_args() -> argparse.Namespace:
@@ -14,7 +14,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _init_table(conn: sqlite3.Connection) -> None:
+def _init_table(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS team_schedule (
@@ -58,7 +58,7 @@ def main() -> None:
     if end_month < start_month:
         raise ValueError("end-month must be >= start-month")
 
-    conn = sqlite3.connect(args.db)
+    conn = connect_for_path(args.db)
     try:
         _init_table(conn)
         now = dt.datetime.utcnow().isoformat() + "Z"
@@ -72,7 +72,8 @@ def main() -> None:
                 if not game_date or not away_team or not home_team:
                     continue
                 schedule_key = _build_schedule_key(row)
-                conn.execute(
+                execute(
+                    conn,
                     """
                     INSERT INTO team_schedule
                     (season, game_date, game_id, schedule_key, away_team, home_team, game_time, stadium, status, source, collected_at)
@@ -88,7 +89,7 @@ def main() -> None:
                       source=excluded.source,
                       collected_at=excluded.collected_at
                     """,
-                    (
+                    [
                         season,
                         game_date,
                         str(row.get("game_id") or "").strip() or None,
@@ -99,7 +100,7 @@ def main() -> None:
                         str(row.get("stadium") or "").strip() or None,
                         str(row.get("status") or "").strip() or None,
                         now,
-                    ),
+                    ],
                 )
                 upserted += 1
         conn.commit()
