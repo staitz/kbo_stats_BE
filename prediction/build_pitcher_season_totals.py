@@ -1,7 +1,7 @@
 import argparse
-import sqlite3
 from typing import List
 
+from db_support import connect_for_path, execute, executemany, is_postgres, row_value, table_columns, table_exists
 
 RUNS_PER_WIN = 10.0
 SP_REP_GAP = 0.8
@@ -16,7 +16,7 @@ def safe_col(name: str) -> str:
     return name
 
 
-def ensure_table(conn: sqlite3.Connection) -> None:
+def ensure_table(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS pitcher_season_totals (
@@ -54,7 +54,7 @@ def ensure_table(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(pitcher_season_totals)").fetchall()}
+    existing = {col.lower() for col in table_columns(conn, "pitcher_season_totals")}
     required = {
         "role": "TEXT NOT NULL DEFAULT ''",
         "FIP": "REAL NOT NULL DEFAULT 0",
@@ -62,7 +62,7 @@ def ensure_table(conn: sqlite3.Connection) -> None:
         "WAR": "REAL NOT NULL DEFAULT 0",
     }
     for col, col_def in required.items():
-        if col not in existing:
+        if col.lower() not in existing:
             conn.execute(f"ALTER TABLE pitcher_season_totals ADD COLUMN {safe_col(col)} {col_def}")
     conn.commit()
 
@@ -96,7 +96,7 @@ def _pitcher_war(fip: float, lg_fip: float, ip: float, role: str) -> float:
     return round(((((fip_rep - fip) / 9.0) * ip) / RUNS_PER_WIN), 2)
 
 
-def _fetch_player_rows(conn: sqlite3.Connection, season: int, team: str | None) -> List[sqlite3.Row]:
+def _fetch_player_rows(conn, season: int, team: str | None) -> List[object]:
     params: List[object] = [season, str(season)]
     where = ["substr(game_date, 1, 4) = ?"]
     if team:
@@ -129,11 +129,12 @@ def _fetch_player_rows(conn: sqlite3.Connection, season: int, team: str | None) 
     WHERE {' AND '.join(where)}
     GROUP BY team, player_name
     """
-    return conn.execute(sql, params).fetchall()
+    return conn.execute(sql.replace("?", "%s") if is_postgres(conn) else sql, params).fetchall()
 
 
-def _fetch_league_row(conn: sqlite3.Connection, season: int) -> sqlite3.Row:
-    return conn.execute(
+def _fetch_league_row(conn, season: int):
+    return execute(
+        conn,
         """
         SELECT
             COALESCE(SUM(OUTS), 0) AS OUTS,
@@ -145,7 +146,7 @@ def _fetch_league_row(conn: sqlite3.Connection, season: int) -> sqlite3.Row:
         FROM pitcher_game_logs
         WHERE substr(game_date, 1, 4) = ?
         """,
-        (str(season),),
+        [str(season)],
     ).fetchone()
 
 
@@ -158,61 +159,58 @@ def main() -> None:
     parser.add_argument("--preview", type=int, default=0)
     args = parser.parse_args()
 
-    conn = sqlite3.connect(args.db)
-    conn.row_factory = sqlite3.Row
+    conn = connect_for_path(args.db)
 
-    if not conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='pitcher_game_logs'"
-    ).fetchone():
+    if not table_exists(conn, "pitcher_game_logs"):
         raise SystemExit("Missing table: pitcher_game_logs")
 
     ensure_table(conn)
     player_rows = _fetch_player_rows(conn, args.season, args.team)
     league_row = _fetch_league_row(conn, args.season)
 
-    league_outs = float(league_row["OUTS"] or 0)
+    league_outs = float(row_value(league_row, "OUTS", 0) or 0)
     league_ip = league_outs / 3.0 if league_outs > 0 else 0.0
-    league_era = _rate(float(league_row["ER"] or 0), league_ip, 9.0)
+    league_era = _rate(float(row_value(league_row, "ER", 0) or 0), league_ip, 9.0)
     league_fip_core = 0.0
     if league_ip > 0:
         league_fip_core = (
-            (13.0 * float(league_row["HR"] or 0))
-            + (3.0 * (float(league_row["BB"] or 0) + float(league_row["HBP"] or 0)))
-            - (2.0 * float(league_row["SO"] or 0))
+            (13.0 * float(row_value(league_row, "HR", 0) or 0))
+            + (3.0 * (float(row_value(league_row, "BB", 0) or 0) + float(row_value(league_row, "HBP", 0) or 0)))
+            - (2.0 * float(row_value(league_row, "SO", 0) or 0))
         ) / league_ip
     fip_constant = league_era - league_fip_core
     lg_fip = _fip(
-        hr=float(league_row["HR"] or 0),
-        bb=float(league_row["BB"] or 0),
-        hbp=float(league_row["HBP"] or 0),
-        so=float(league_row["SO"] or 0),
+        hr=float(row_value(league_row, "HR", 0) or 0),
+        bb=float(row_value(league_row, "BB", 0) or 0),
+        hbp=float(row_value(league_row, "HBP", 0) or 0),
+        so=float(row_value(league_row, "SO", 0) or 0),
         ip=league_ip,
         fip_constant=fip_constant,
     )
 
     rows_to_write: List[tuple] = []
     for row in player_rows:
-        season = int(row["season"] or args.season)
-        team = str(row["team"] or "")
-        player_name = str(row["player_name"] or "")
-        role = str(row["role"] or "").strip()
-        games = int(row["games"] or 0)
-        wins = int(row["W"] or 0)
-        losses = int(row["L"] or 0)
-        saves = int(row["SV"] or 0)
-        holds = int(row["HLD"] or 0)
-        batters_faced = int(row["BF"] or 0)
-        pitches = int(row["NP"] or 0)
-        outs = int(row["OUTS"] or 0)
-        hits = int(row["H"] or 0)
-        runs = int(row["R"] or 0)
-        earned_runs = int(row["ER"] or 0)
-        walks = int(row["BB"] or 0)
-        strikeouts = int(row["SO"] or 0)
-        home_runs = int(row["HR"] or 0)
-        hit_by_pitch = int(row["HBP"] or 0)
-        balks = int(row["BK"] or 0)
-        wild_pitches = int(row["WP"] or 0)
+        season = int(row_value(row, "season", args.season) or args.season)
+        team = str(row_value(row, "team", "") or "")
+        player_name = str(row_value(row, "player_name", "") or "")
+        role = str(row_value(row, "role", "") or "").strip()
+        games = int(row_value(row, "games", 0) or 0)
+        wins = int(row_value(row, "W", 0) or 0)
+        losses = int(row_value(row, "L", 0) or 0)
+        saves = int(row_value(row, "SV", 0) or 0)
+        holds = int(row_value(row, "HLD", 0) or 0)
+        batters_faced = int(row_value(row, "BF", 0) or 0)
+        pitches = int(row_value(row, "NP", 0) or 0)
+        outs = int(row_value(row, "OUTS", 0) or 0)
+        hits = int(row_value(row, "H", 0) or 0)
+        runs = int(row_value(row, "R", 0) or 0)
+        earned_runs = int(row_value(row, "ER", 0) or 0)
+        walks = int(row_value(row, "BB", 0) or 0)
+        strikeouts = int(row_value(row, "SO", 0) or 0)
+        home_runs = int(row_value(row, "HR", 0) or 0)
+        hit_by_pitch = int(row_value(row, "HBP", 0) or 0)
+        balks = int(row_value(row, "BK", 0) or 0)
+        wild_pitches = int(row_value(row, "WP", 0) or 0)
 
         ip = outs / 3.0
         era = _rate(earned_runs, ip, 9.0)
@@ -259,13 +257,41 @@ def main() -> None:
         )
 
     sql = """
-    INSERT OR REPLACE INTO pitcher_season_totals (
+    INSERT INTO pitcher_season_totals (
         season, team, player_name, role, games, W, L, SV, HLD, BF, NP, OUTS, IP,
         H, R, ER, BB, SO, HR, HBP, BK, WP, ERA, WHIP, K9, BB9, KBB, FIP, pitcher_war, WAR
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(season, team, player_name) DO UPDATE SET
+        role=excluded.role,
+        games=excluded.games,
+        W=excluded.W,
+        L=excluded.L,
+        SV=excluded.SV,
+        HLD=excluded.HLD,
+        BF=excluded.BF,
+        NP=excluded.NP,
+        OUTS=excluded.OUTS,
+        IP=excluded.IP,
+        H=excluded.H,
+        R=excluded.R,
+        ER=excluded.ER,
+        BB=excluded.BB,
+        SO=excluded.SO,
+        HR=excluded.HR,
+        HBP=excluded.HBP,
+        BK=excluded.BK,
+        WP=excluded.WP,
+        ERA=excluded.ERA,
+        WHIP=excluded.WHIP,
+        K9=excluded.K9,
+        BB9=excluded.BB9,
+        KBB=excluded.KBB,
+        FIP=excluded.FIP,
+        pitcher_war=excluded.pitcher_war,
+        WAR=excluded.WAR
     """
-    conn.executemany(sql, rows_to_write)
+    executemany(conn, sql, rows_to_write)
     conn.commit()
 
     print(f"Built pitcher_season_totals for season={args.season}, team={args.team or 'ALL'}")
@@ -273,7 +299,8 @@ def main() -> None:
     print(f"League FIP baseline: {lg_fip:.3f} (constant={fip_constant:.3f})")
 
     if args.preview and args.preview > 0:
-        preview_rows = conn.execute(
+        preview_rows = execute(
+            conn,
             """
             SELECT team, player_name, role, IP, FIP, pitcher_war
             FROM pitcher_season_totals
@@ -281,12 +308,26 @@ def main() -> None:
             ORDER BY pitcher_war DESC, OUTS DESC
             LIMIT ?
             """,
-            (args.season, args.preview),
+            [args.season, args.preview],
         ).fetchall()
         print("Preview top pitcher_war")
         for row in preview_rows:
+            if isinstance(row, dict):
+                team_name = row_value(row, "team", "")
+                player_name = row_value(row, "player_name", "")
+                role = row_value(row, "role", "")
+                innings = float(row_value(row, "IP", 0) or 0)
+                fip = float(row_value(row, "FIP", 0) or 0)
+                pitcher_war = float(row_value(row, "pitcher_war", 0) or 0)
+            else:
+                team_name = row[0]
+                player_name = row[1]
+                role = row[2]
+                innings = float(row[3] or 0)
+                fip = float(row[4] or 0)
+                pitcher_war = float(row[5] or 0)
             print(
-                f"{row['team']}\t{row['player_name']}\t{row['role']}\tIP={row['IP']:.1f}\tFIP={row['FIP']:.3f}\tpitcher_war={row['pitcher_war']:.2f}"
+                f"{team_name}\t{player_name}\t{role}\tIP={innings:.1f}\tFIP={fip:.3f}\tpitcher_war={pitcher_war:.2f}"
             )
 
     conn.close()
