@@ -21,10 +21,10 @@ import argparse
 import json
 import os
 import pickle
-import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
+from db_support import connect_for_path, execute, executemany, row_value, table_columns as shared_table_columns, table_exists
 
 def safe_col(name: str) -> str:
     if not name:
@@ -34,9 +34,8 @@ def safe_col(name: str) -> str:
     return name
 
 
-def table_columns(conn: sqlite3.Connection, table: str) -> Dict[str, str]:
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return {row[1]: (row[2] or "") for row in rows}
+def table_columns(conn, table: str) -> Dict[str, str]:
+    return {col: "" for col in shared_table_columns(conn, table)}
 
 
 def is_numeric(col_type: str) -> bool:
@@ -46,7 +45,7 @@ def is_numeric(col_type: str) -> bool:
     return "INT" in t or "REAL" in t or "NUM" in t or "DEC" in t or "FLOAT" in t
 
 
-def ensure_predictions_table(conn: sqlite3.Connection) -> None:
+def ensure_predictions_table(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS hitter_predictions (
@@ -164,16 +163,11 @@ def main() -> None:
             meta = json.load(f)
     blend_k = float(args.blend_k if args.blend_k is not None else meta.get("recommended_blend_k", 60.0))
 
-    conn = sqlite3.connect(args.db)
-    conn.row_factory = sqlite3.Row
+    conn = connect_for_path(args.db)
 
-    if not conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='hitter_daily_snapshots'"
-    ).fetchone():
+    if not table_exists(conn, "hitter_daily_snapshots"):
         raise SystemExit("Missing table: hitter_daily_snapshots")
-    if not conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='hitter_season_totals'"
-    ).fetchone():
+    if not table_exists(conn, "hitter_season_totals"):
         raise SystemExit("Missing table: hitter_season_totals")
 
     ensure_predictions_table(conn)
@@ -229,7 +223,8 @@ def main() -> None:
         filters.append("s.team = ?")
         params.append(args.team)
 
-    rows = conn.execute(
+    rows = execute(
+        conn,
         f"""
         SELECT
             s.team,
@@ -259,7 +254,8 @@ def main() -> None:
         if args.team:
             prior_filters.append("team = ?")
             prior_params.append(args.team)
-        prior_rows = conn.execute(
+        prior_rows = execute(
+            conn,
             f"""
             SELECT team, player_name, COALESCE(PA, 0) AS prev_season_pa,
                    COALESCE(HR, 0) AS prev_season_hr, COALESCE(OPS, 0.0) AS prev_season_ops
@@ -386,18 +382,18 @@ def main() -> None:
             ]
         )
 
-    cursor = conn.cursor()
-    cursor.executemany(insert_sql, values)
+    executemany(conn, insert_sql, values)
     conn.commit()
 
     print(
         f"Predictions saved for season={args.season}, as_of={args.as_of}, "
         f"team={args.team or 'ALL'} target_mode={target_mode} blend_k={blend_k}"
     )
-    print(f"Rows inserted: {cursor.rowcount}")
+    print(f"Rows inserted: {len(values)}")
 
     if args.preview and args.preview > 0:
-        preview_rows = conn.execute(
+        preview_rows = execute(
+            conn,
             """
             SELECT team, player_name, predicted_ops_final, predicted_hr_final,
                    confidence_level, pa_to_date, blend_weight, model_source
@@ -406,14 +402,14 @@ def main() -> None:
             ORDER BY predicted_ops_final DESC
             LIMIT ?
             """,
-            (args.season, args.as_of, args.preview),
+            [args.season, args.as_of, args.preview],
         ).fetchall()
         print("Preview top predicted OPS")
         for row in preview_rows:
             print(
-                f"{row['team']}\t{row['player_name']}\tOPS={row['predicted_ops_final']:.4f}"
-                f"\tHR={row['predicted_hr_final']:.1f}\tPA={row['pa_to_date']:.0f}"
-                f"\tw={row['blend_weight']:.3f}\t{row['model_source']}\t{row['confidence_level']}"
+                f"{row_value(row, 'team', '')}\t{row_value(row, 'player_name', '')}\tOPS={float(row_value(row, 'predicted_ops_final', 0) or 0):.4f}"
+                f"\tHR={float(row_value(row, 'predicted_hr_final', 0) or 0):.1f}\tPA={float(row_value(row, 'pa_to_date', 0) or 0):.0f}"
+                f"\tw={float(row_value(row, 'blend_weight', 0) or 0):.3f}\t{row_value(row, 'model_source', '')}\t{row_value(row, 'confidence_level', '')}"
             )
 
     conn.close()
