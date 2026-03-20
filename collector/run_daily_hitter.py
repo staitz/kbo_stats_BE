@@ -1,6 +1,5 @@
 import argparse
 import datetime as dt
-import sqlite3
 import time
 from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
@@ -8,6 +7,7 @@ from zoneinfo import ZoneInfo
 from collector.kbo_api import _make_driver
 from collector.kbo_naver_crawler import fetch_day_schedule, parse_naver_boxscore
 from collector.kbo_db import DB_PATH, init_db, insert_rows, migrate_columns
+from db_support import connect
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 
@@ -53,7 +53,7 @@ def collect_for_dates(
             "skipped_days": 0,
         }
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     init_db(conn)
     migrate_columns(conn)
 
