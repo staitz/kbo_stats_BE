@@ -1,11 +1,11 @@
 import argparse
 import datetime as dt
-import sqlite3
 from zoneinfo import ZoneInfo
 
 from collector.kbo_db import DB_PATH, init_db, migrate_columns
 from collector.run_range_hitter import _iter_dates
 from collector.run_daily_hitter import collect_for_dates
+from db_support import connect, fetchone, row_value
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -21,16 +21,17 @@ def _add_days(yyyymmdd: str, days: int) -> str:
     return d.strftime("%Y%m%d")
 
 
-def _read_latest_game_date(conn: sqlite3.Connection) -> str:
-    row = conn.execute(
+def _read_latest_game_date(conn) -> str:
+    row = fetchone(
+        conn,
         """
         SELECT game_date
         FROM hitter_game_logs
         ORDER BY game_date DESC
         LIMIT 1
         """
-    ).fetchone()
-    return row[0] if row and row[0] else ""
+    )
+    return str(row_value(row, "game_date", row[0] if row else "") or "")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -60,7 +61,7 @@ def main() -> None:
     end = args.end or today
     season_start = args.season_start
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         init_db(conn)
         migrate_columns(conn)
