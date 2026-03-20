@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -8,11 +7,45 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from db_support import connect_for_path, execute, executemany, is_postgres, read_sql_query, row_value
 from .config import AppConfig, get_config
 
 
 DEFAULT_DB = "kbo_stats.db"
 PREDICTION_TABLE = "pitcher_predictions"
+
+_PITCHER_LOG_COLUMN_ALIASES = {
+    "outs": "OUTS",
+    "h": "H",
+    "er": "ER",
+    "bb": "BB",
+    "so": "SO",
+    "hr": "HR",
+    "hbp": "HBP",
+    "w": "W",
+    "l": "L",
+    "sv": "SV",
+    "hld": "HLD",
+}
+
+_PITCHER_TOTAL_COLUMN_ALIASES = {
+    "w_final": "W_final",
+    "l_final": "L_final",
+    "sv_final": "SV_final",
+    "hld_final": "HLD_final",
+    "ip_final": "IP_final",
+    "outs_final": "OUTS_final",
+    "h_final": "H_final",
+    "er_final": "ER_final",
+    "bb_final": "BB_final",
+    "so_final": "SO_final",
+    "era_final": "ERA_final",
+    "whip_final": "WHIP_final",
+    "k9_final": "K9_final",
+    "bb9_final": "BB9_final",
+    "kbb_final": "KBB_final",
+    "war_final": "WAR_final",
+}
 
 
 @dataclass(slots=True)
@@ -30,9 +63,10 @@ def _safe_numeric(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return frame
 
 
-def _load_birth_dates(conn: sqlite3.Connection) -> dict[str, str]:
+def _load_birth_dates(conn) -> dict[str, str]:
     try:
-        rows = conn.execute(
+        rows = execute(
+            conn,
             """
             SELECT player_name, birth_date
             FROM statiz_players
@@ -41,9 +75,15 @@ def _load_birth_dates(conn: sqlite3.Connection) -> dict[str, str]:
               AND birth_date <> ''
             """
         ).fetchall()
-    except sqlite3.Error:
+    except Exception:
         return {}
-    return {str(name).strip(): str(birth).strip() for name, birth in rows if str(name).strip() and str(birth).strip()}
+    out: dict[str, str] = {}
+    for row in rows:
+        name = str(row_value(row, "player_name", "") or "").strip()
+        birth = str(row_value(row, "birth_date", "") or "").strip()
+        if name and birth:
+            out[name] = birth
+    return out
 
 
 def _season_age(player_name: str, season: int, birth_dates: dict[str, str]) -> float:
@@ -58,7 +98,7 @@ def _season_age(player_name: str, season: int, birth_dates: dict[str, str]) -> f
 
 
 def load_pitcher_logs(db_path: str, season: int) -> pd.DataFrame:
-    conn = sqlite3.connect(db_path)
+    conn = connect_for_path(db_path)
     try:
         query = """
         SELECT
@@ -83,9 +123,10 @@ def load_pitcher_logs(db_path: str, season: int) -> pd.DataFrame:
         WHERE substr(game_date, 1, 4) = ?
         ORDER BY game_date ASC, game_id ASC, team ASC, player_name ASC
         """
-        frame = pd.read_sql_query(query, conn, params=[str(season)])
+        frame = read_sql_query(query, conn, params=[str(season)])
         if frame.empty:
             return frame
+        frame = frame.rename(columns={k: v for k, v in _PITCHER_LOG_COLUMN_ALIASES.items() if k in frame.columns})
         frame["season"] = frame["season"].astype(int)
         frame["game_date"] = pd.to_datetime(frame["game_date"], format="%Y%m%d")
         numeric_cols = ["OUTS", "H", "ER", "BB", "SO", "HR", "HBP", "W", "L", "SV", "HLD"]
@@ -95,7 +136,7 @@ def load_pitcher_logs(db_path: str, season: int) -> pd.DataFrame:
 
 
 def load_pitcher_final_totals(db_path: str, season: int) -> pd.DataFrame:
-    conn = sqlite3.connect(db_path)
+    conn = connect_for_path(db_path)
     try:
         query = """
         SELECT
@@ -123,9 +164,10 @@ def load_pitcher_final_totals(db_path: str, season: int) -> pd.DataFrame:
         FROM pitcher_season_totals
         WHERE season = ?
         """
-        frame = pd.read_sql_query(query, conn, params=[season])
+        frame = read_sql_query(query, conn, params=[season])
         if frame.empty:
             return frame
+        frame = frame.rename(columns={k: v for k, v in _PITCHER_TOTAL_COLUMN_ALIASES.items() if k in frame.columns})
 
         numeric_cols = [
             "games",
@@ -190,7 +232,7 @@ def build_training_samples(
 
     fip_constant = estimate_fip_constant(logs)
     birth_dates: dict[str, str]
-    with sqlite3.connect(db_path) as conn:
+    with connect_for_path(db_path) as conn:
         birth_dates = _load_birth_dates(conn)
 
     final_map = {
@@ -364,7 +406,7 @@ def prepare_model_matrix(
     return x, y
 
 
-def ensure_prediction_table(conn: sqlite3.Connection) -> None:
+def ensure_prediction_table(conn) -> None:
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {PREDICTION_TABLE} (
@@ -388,7 +430,7 @@ def ensure_prediction_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def upsert_predictions(conn: sqlite3.Connection, frame: pd.DataFrame) -> int:
+def upsert_predictions(conn, frame: pd.DataFrame) -> int:
     ensure_prediction_table(conn)
     rows = [
         (
@@ -408,8 +450,9 @@ def upsert_predictions(conn: sqlite3.Connection, frame: pd.DataFrame) -> int:
         )
         for row in frame.itertuples(index=False)
     ]
-    before = conn.total_changes
-    conn.executemany(
+    before = getattr(conn, "total_changes", 0)
+    executemany(
+        conn,
         f"""
         INSERT INTO {PREDICTION_TABLE} (
             season, as_of_date, team, player_name, role,
@@ -431,4 +474,4 @@ def upsert_predictions(conn: sqlite3.Connection, frame: pd.DataFrame) -> int:
         rows,
     )
     conn.commit()
-    return conn.total_changes - before
+    return (getattr(conn, "total_changes", 0) - before) if not is_postgres(conn) else len(rows)
