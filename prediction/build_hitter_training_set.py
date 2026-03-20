@@ -17,11 +17,11 @@ raise SystemExit(
 )
 
 import argparse
-import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Tuple
 
+from db_support import connect_for_path, execute, executemany, row_value, table_columns as shared_table_columns, table_exists
 
 def safe_col(name: str) -> str:
     if not name:
@@ -31,9 +31,8 @@ def safe_col(name: str) -> str:
     return name
 
 
-def table_columns(conn: sqlite3.Connection, table: str) -> Dict[str, str]:
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return {row[1]: (row[2] or "") for row in rows}
+def table_columns(conn, table: str) -> Dict[str, str]:
+    return {col: "" for col in shared_table_columns(conn, table)}
 
 
 def is_numeric(col_type: str) -> bool:
@@ -43,9 +42,7 @@ def is_numeric(col_type: str) -> bool:
     return "INT" in t or "REAL" in t or "NUM" in t or "DEC" in t or "FLOAT" in t
 
 
-def ensure_training_table(
-    conn: sqlite3.Connection, feature_cols: List[Tuple[str, str]]
-) -> None:
+def ensure_training_table(conn, feature_cols: List[Tuple[str, str]]) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS hitter_training_rows (
@@ -125,16 +122,11 @@ def main() -> None:
         args.train_season = kst_year - 1
         print(f"train_season not provided; using {args.train_season} (KST year-1)")
 
-    conn = sqlite3.connect(args.db)
-    conn.row_factory = sqlite3.Row
+    conn = connect_for_path(args.db)
 
-    if not conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='hitter_daily_snapshots'"
-    ).fetchone():
+    if not table_exists(conn, "hitter_daily_snapshots"):
         raise SystemExit("Missing table: hitter_daily_snapshots")
-    if not conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='hitter_season_totals'"
-    ).fetchone():
+    if not table_exists(conn, "hitter_season_totals"):
         raise SystemExit("Missing table: hitter_season_totals")
 
     snapshot_cols = table_columns(conn, "hitter_daily_snapshots")
@@ -180,7 +172,8 @@ def main() -> None:
     if args.end:
         filters.append("as_of_date <= ?")
         params.append(args.end)
-    date_rows = conn.execute(
+    date_rows = execute(
+        conn,
         f"""
         SELECT DISTINCT as_of_date
         FROM hitter_daily_snapshots
@@ -188,7 +181,7 @@ def main() -> None:
         """,
         params,
     ).fetchall()
-    distinct_dates = [row[0] for row in date_rows]
+    distinct_dates = [str(row_value(row, "as_of_date", row[0] if not isinstance(row, dict) else "")) for row in date_rows]
     sample_dates = pick_sample_dates(distinct_dates, args.start, args.end)
     if not sample_dates:
         print("No sample dates found.")
@@ -237,7 +230,7 @@ def main() -> None:
     select_params: List = [args.train_season, args.train_season, args.train_season, args.train_season]
     select_params.extend(sample_dates)
 
-    rows = conn.execute(sql, select_params).fetchall()
+    rows = execute(conn, sql, select_params).fetchall()
     if not rows:
         print("No training rows matched.")
         return
@@ -265,19 +258,19 @@ def main() -> None:
 
     values = []
     for row in rows:
-        values.append([row[col] for col in insert_cols])
+        values.append([row_value(row, col, None) for col in insert_cols])
 
-    cursor = conn.cursor()
-    cursor.executemany(insert_sql, values)
+    executemany(conn, insert_sql, values)
     conn.commit()
 
     print(
         f"Training rows built for train_season={args.train_season}, "
         f"dates={len(sample_dates)}, team={args.team or 'ALL'}"
     )
-    print(f"Rows inserted: {cursor.rowcount}")
+    print(f"Rows inserted: {len(values)}")
 
-    summary = conn.execute(
+    summary = execute(
+        conn,
         """
         SELECT COUNT(*) AS cnt,
                AVG(y_hr_final) AS avg_hr,
@@ -287,13 +280,13 @@ def main() -> None:
         FROM hitter_training_rows
         WHERE train_season = ?
         """,
-        (args.train_season,),
+        [args.train_season],
     ).fetchone()
     if summary:
         print(
-            f"Target summary: rows={summary['cnt']} avg_hr={summary['avg_hr']:.3f} "
-            f"avg_ops={summary['avg_ops']:.4f} avg_hr_ros={summary['avg_hr_ros']:.3f} "
-            f"avg_ops_ros={summary['avg_ops_ros']:.4f}"
+            f"Target summary: rows={int(row_value(summary, 'cnt', 0) or 0)} avg_hr={float(row_value(summary, 'avg_hr', 0) or 0):.3f} "
+            f"avg_ops={float(row_value(summary, 'avg_ops', 0) or 0):.4f} avg_hr_ros={float(row_value(summary, 'avg_hr_ros', 0) or 0):.3f} "
+            f"avg_ops_ros={float(row_value(summary, 'avg_ops_ros', 0) or 0):.4f}"
         )
 
     conn.close()
