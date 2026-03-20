@@ -7,11 +7,11 @@ reads from the Django API server do not collide with the nightly upsert writer.
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 import pandas as pd
 
+from db_support import connect_for_path, read_sql_query
 from .mock_data import make_mock_hitter_game_logs
 
 # ---------------------------------------------------------------------------
@@ -25,22 +25,17 @@ _DEFAULT_DB_RELATIVE_PATH = Path(__file__).resolve().parents[2] / "kbo_stats.db"
 # ---------------------------------------------------------------------------
 
 
-def open_db(db_path: str | Path, wal: bool = True) -> sqlite3.Connection:
-    """Open a SQLite connection.
+def open_db(db_path: str | Path, wal: bool = True):
+    """Open a database connection.
 
     Args:
-        db_path: Path to the SQLite database file.
-        wal:     If True (default) switch the journal mode to WAL so that
-                 concurrent readers from the Django API server and the nightly
-                 writer do not block each other.
+        db_path: Path to the database file when using SQLite.
+        wal:     Kept for backward compatibility. Ignored for PostgreSQL.
 
     Returns:
-        An open :class:`sqlite3.Connection`.
+        An open DB-API connection.
     """
-    conn = sqlite3.connect(str(db_path))
-    if wal:
-        conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    return connect_for_path(db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -76,9 +71,27 @@ _GAME_LOG_QUERY = """
     ORDER BY game_date ASC, game_id ASC, team ASC, player_name ASC
 """
 
+_HITTER_COLUMN_ALIASES = {
+    "ab": "AB",
+    "h": "H",
+    "hr": "HR",
+    "bb": "BB",
+    "so": "SO",
+    "hbp": "HBP",
+    "sf": "SF",
+    "r": "R",
+    "rbi": "RBI",
+    "tb": "TB",
+    "pa": "PA",
+    "sb": "SB",
+    "cs": "CS",
+    "gdp": "GDP",
+    "sh": "SH",
+}
+
 
 def load_hitter_game_logs_from_db(db_path: str | Path, season: int) -> pd.DataFrame:
-    """Load a full season of hitter game logs from the SQLite database.
+    """Load a full season of hitter game logs from the database.
 
     Args:
         db_path: Path to the SQLite database file.
@@ -89,9 +102,13 @@ def load_hitter_game_logs_from_db(db_path: str | Path, season: int) -> pd.DataFr
     """
     conn = open_db(db_path)
     try:
-        df = pd.read_sql_query(_GAME_LOG_QUERY, conn, params=[str(season)])
+        df = read_sql_query(_GAME_LOG_QUERY, conn, params=[str(season)])
     finally:
         conn.close()
+    df = df.rename(columns={k: v for k, v in _HITTER_COLUMN_ALIASES.items() if k in df.columns})
+    for special in ("2b", "3b"):
+        if special in df.columns:
+            df.rename(columns={special: special.upper()}, inplace=True)
     return df
 
 
