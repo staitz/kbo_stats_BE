@@ -1,7 +1,4 @@
-import sqlite3
-
-
-def init_kbreport_tables(conn: sqlite3.Connection) -> None:
+def init_kbreport_tables(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS kbreport_hitter_splits (
