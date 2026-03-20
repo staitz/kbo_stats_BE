@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -32,6 +31,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
+from db_support import connect_for_path, execute, row_value
 from .mvp_pipeline.backtest import evaluate_predictions
 from .mvp_pipeline.config import get_config
 from .mvp_pipeline.db import load_hitter_game_logs
@@ -151,22 +151,23 @@ def check_quality(
         checks.append(CheckItem("db_exists", "FAIL", f"DB not found: {db}"))
         return CheckResult("quality", False, False, checks)
 
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row
+    conn = connect_for_path(db)
     try:
         # ── 1. Row count ────────────────────────────────────────────────────
-        row = conn.execute(
+        row = execute(
+            conn,
             "SELECT COUNT(*) AS cnt FROM hitter_predictions WHERE season=? AND as_of_date=? AND prediction_mode=?",
-            (season, as_of_date, mode),
+            [season, as_of_date, mode],
         ).fetchone()
-        cnt = int(row["cnt"] if row else 0)
+        cnt = int(row_value(row, "cnt", 0) or 0)
         if cnt == 0:
             checks.append(CheckItem("row_count", "FAIL", f"0 rows for season={season} as_of={as_of_date} mode={mode}", cnt))
             return CheckResult("quality", False, False, checks)
         checks.append(CheckItem("row_count", "OK", f"{cnt} rows found", cnt))
 
         # ── 2. NULL checks ──────────────────────────────────────────────────
-        null_row = conn.execute(
+        null_row = execute(
+            conn,
             """
             SELECT
                 SUM(CASE WHEN predicted_ops_final IS NULL THEN 1 ELSE 0 END) AS null_ops,
@@ -177,17 +178,18 @@ def check_quality(
             FROM hitter_predictions
             WHERE season=? AND as_of_date=? AND prediction_mode=?
             """,
-            (season, as_of_date, mode),
+            [season, as_of_date, mode],
         ).fetchone()
         for col, key in [("predicted_ops_final", "null_ops"), ("predicted_hr_final", "null_hr"),
                          ("predicted_war_final", "null_war"), ("player_name", "null_name"),
                          ("confidence_level", "null_conf")]:
-            n = int(null_row[key] or 0)
+            n = int(row_value(null_row, key, 0) or 0)
             sev: Severity = "FAIL" if n > 0 else "OK"
             checks.append(CheckItem(f"null_{col}", sev, f"{n} NULL in {col}", n))
 
         # ── 3. OPS range ────────────────────────────────────────────────────
-        range_row = conn.execute(
+        range_row = execute(
+            conn,
             """
             SELECT
                 SUM(CASE WHEN predicted_ops_final < ? OR predicted_ops_final > ? THEN 1 ELSE 0 END) AS bad_ops,
@@ -196,47 +198,54 @@ def check_quality(
             FROM hitter_predictions
             WHERE season=? AND as_of_date=? AND prediction_mode=?
             """,
-            (OPS_MIN, OPS_MAX, HR_MIN, BLEND_MIN, BLEND_MAX, season, as_of_date, mode),
+            [OPS_MIN, OPS_MAX, HR_MIN, BLEND_MIN, BLEND_MAX, season, as_of_date, mode],
         ).fetchone()
-        bad_ops  = int(range_row["bad_ops"]   or 0)
-        neg_hr   = int(range_row["neg_hr"]    or 0)
-        bad_blend = int(range_row["bad_blend"] or 0)
+        bad_ops  = int(row_value(range_row, "bad_ops", 0) or 0)
+        neg_hr   = int(row_value(range_row, "neg_hr", 0) or 0)
+        bad_blend = int(row_value(range_row, "bad_blend", 0) or 0)
         checks.append(CheckItem("ops_range",   "FAIL" if bad_ops   > 0 else "OK", f"{bad_ops} OPS outside [{OPS_MIN},{OPS_MAX}]",   bad_ops))
         checks.append(CheckItem("hr_negative", "WARN" if neg_hr    > 0 else "OK", f"{neg_hr} negative HR predictions",               neg_hr))
         checks.append(CheckItem("blend_range", "WARN" if bad_blend > 0 else "OK", f"{bad_blend} blend_weight outside [0,1]",         bad_blend))
 
         # ── 4. confidence_level values ──────────────────────────────────────
-        conf_rows = conn.execute(
+        conf_rows = execute(
+            conn,
             "SELECT DISTINCT confidence_level FROM hitter_predictions WHERE season=? AND as_of_date=? AND prediction_mode=?",
-            (season, as_of_date, mode),
+            [season, as_of_date, mode],
         ).fetchall()
-        bad_conf_vals = [r["confidence_level"] for r in conf_rows if r["confidence_level"] not in VALID_CONFIDENCE_LEVELS]
+        bad_conf_vals = [
+            row_value(r, "confidence_level", None)
+            for r in conf_rows
+            if row_value(r, "confidence_level", None) not in VALID_CONFIDENCE_LEVELS
+        ]
         checks.append(CheckItem("confidence_values",
                                 "FAIL" if bad_conf_vals else "OK",
                                 f"invalid confidence_level values: {bad_conf_vals}" if bad_conf_vals else "all values in {LOW,MEDIUM,HIGH}",
                                 bad_conf_vals))
 
         # ── 5. model_version uniqueness ─────────────────────────────────────
-        mv_rows = conn.execute(
+        mv_rows = execute(
+            conn,
             "SELECT DISTINCT model_version FROM hitter_predictions WHERE season=? AND as_of_date=? AND prediction_mode=?",
-            (season, as_of_date, mode),
+            [season, as_of_date, mode],
         ).fetchall()
-        mv_list = [r["model_version"] for r in mv_rows]
+        mv_list = [row_value(r, "model_version", "") for r in mv_rows]
         checks.append(CheckItem("model_version_unique",
                                 "WARN" if len(mv_list) > 1 else "OK",
                                 f"multiple model_versions in same batch: {mv_list}" if len(mv_list) > 1 else f"single version: {mv_list}",
                                 mv_list))
 
         # ── 6. as_of_date format ────────────────────────────────────────────
-        bad_date_row = conn.execute(
+        bad_date_row = execute(
+            conn,
             """
             SELECT COUNT(*) AS cnt FROM hitter_predictions
             WHERE season=? AND as_of_date=? AND prediction_mode=?
-              AND (LENGTH(as_of_date) != 10 OR as_of_date NOT GLOB '????-??-??')
+              AND (LENGTH(as_of_date) != 10 OR as_of_date NOT LIKE '____-__-__')
             """,
-            (season, as_of_date, mode),
+            [season, as_of_date, mode],
         ).fetchone()
-        bad_dates = int(bad_date_row["cnt"] or 0)
+        bad_dates = int(row_value(bad_date_row, "cnt", 0) or 0)
         checks.append(CheckItem("as_of_date_format", "FAIL" if bad_dates > 0 else "OK",
                                 f"{bad_dates} rows with non-YYYY-MM-DD as_of_date", bad_dates))
 
