@@ -1,13 +1,13 @@
 import argparse
 import datetime as dt
 import re
-import sqlite3
 from io import StringIO
 from typing import Any
 
 import pandas as pd
 import requests
 
+from db_support import connect_for_path, execute
 from collector.kbreport_db import init_kbreport_tables
 
 
@@ -188,7 +188,7 @@ def _normalize_team_name(code: str, label: str) -> str:
 
 
 def _save_split(
-    conn: sqlite3.Connection,
+    conn,
     season: int,
     player_id: str,
     player_name: str,
@@ -199,7 +199,8 @@ def _save_split(
     source_url: str,
     collected_at: str,
 ) -> None:
-    conn.execute(
+    execute(
+        conn,
         """
         INSERT INTO kbreport_hitter_splits
         (season, kbreport_player_id, player_name, split_group, split_key, split_label,
@@ -223,7 +224,7 @@ def _save_split(
           source_url=excluded.source_url,
           collected_at=excluded.collected_at
         """,
-        (
+        [
             season,
             player_id,
             player_name,
@@ -243,7 +244,7 @@ def _save_split(
             stat["OPS"],
             source_url,
             collected_at,
-        ),
+        ],
     )
 
 
@@ -269,7 +270,7 @@ def main() -> None:
         normalized = _normalize_team_name(code, team)
         split_specs.append(("opposite", code, f"VS_TEAM_{normalized}"))
 
-    conn = sqlite3.connect(args.db)
+    conn = connect_for_path(args.db)
     try:
         init_kbreport_tables(conn)
         written = 0
