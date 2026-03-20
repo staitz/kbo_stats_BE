@@ -8,10 +8,54 @@ OPS_WAR_FALLBACK_BASELINE = 0.700
 OPS_WAR_FALLBACK_DIVISOR = 70.0
 
 
+# KBO stat columns that are uppercase in SQLite but get lowercased by PostgreSQL.
+# We normalise them back to UPPER so every downstream consumer can use consistent keys.
+_UPPERCASE_STAT_COLS: frozenset[str] = frozenset({
+    "H", "R", "RBI", "HR", "PA", "AB", "BB", "SO", "HBP", "SH", "SF",
+    "SB", "CS", "GDP", "AVG", "OBP", "SLG", "OPS", "ERA", "WHIP",
+    "IP", "W", "L", "SV", "HLD", "K9", "BB9", "KBB", "OUTS", "WAR",
+    "ER", "2B", "3B",
+})
+
+# Mixed-case columns: lower(col) → original_case.
+# PostgreSQL lowercases unquoted alias names; SQLite preserves them as written.
+_MIXED_CASE_COL_MAP: dict[str, str] = {
+    "tb_adj": "TB_adj",
+    "ops_7": "OPS_7",
+    "ops_14": "OPS_14",
+    "batter_war": "batter_war",   # already lowercase — listed for clarity
+    "pitcher_war": "pitcher_war",
+    "wrc_plus": "wRC+",
+    "wrc": "wRC",
+    "babip": "BABIP",
+    "woba": "wOBA",
+    "fip": "FIP",
+}
+
+
+def _normalize_cols(cols: list[str]) -> list[str]:
+    """Restore stat column names that PostgreSQL lowercases.
+
+    - Fully-uppercase names (H, PA, HR …) → restored via _UPPERCASE_STAT_COLS.
+    - Mixed-case aliases (TB_adj, OPS_7 …) → restored via _MIXED_CASE_COL_MAP.
+    """
+    upper_map = {c.upper(): c for c in _UPPERCASE_STAT_COLS}
+    result = []
+    for c in cols:
+        cu = c.upper()
+        if cu in upper_map:
+            result.append(upper_map[cu])
+        elif c.lower() in _MIXED_CASE_COL_MAP:
+            result.append(_MIXED_CASE_COL_MAP[c.lower()])
+        else:
+            result.append(c)
+    return result
+
+
 def query_all(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
-        cols = [c[0] for c in cursor.description]
+        cols = _normalize_cols([c[0] for c in cursor.description])
         rows = cursor.fetchall()
     return [dict(zip(cols, row)) for row in rows]
 
@@ -158,6 +202,17 @@ def logs_latest_game_date(season: int) -> str | None:
         (str(season),),
     )
     return (row or {}).get("as_of_date")
+
+
+def available_seasons() -> list[int]:
+    """hitter_season_totals에 실제 데이터가 있는 시즌 목록 (내림차순)."""
+    if not table_exists("hitter_season_totals"):
+        return []
+    rows = query_all(
+        "SELECT DISTINCT season FROM hitter_season_totals ORDER BY season DESC",
+        (),
+    )
+    return [int(r["season"]) for r in rows if r.get("season")]
 
 
 def _team_game_rows(season: int) -> list[dict[str, Any]]:
@@ -385,6 +440,83 @@ def top_war_rows(season: int, min_pa: int, limit: int = 5) -> list[dict[str, Any
         """,
         (season, min_pa, limit),
     )
+
+
+def top_combined_war_rows(season: int, min_pa: int, min_outs: int, limit: int = 5) -> list[dict[str, Any]]:
+    hitter_rows: list[dict[str, Any]] = []
+    if table_has_column("hitter_season_totals", "batter_war"):
+        hitter_rows = query_all(
+            """
+            SELECT
+                'hitter' AS player_type,
+                team,
+                player_name,
+                PA,
+                NULL AS OUTS,
+                batter_war AS WAR
+            FROM hitter_season_totals
+            WHERE season = %s AND PA >= %s
+            """,
+            (season, min_pa),
+        )
+    elif table_has_column("hitter_season_totals", "WAR"):
+        hitter_rows = query_all(
+            """
+            SELECT
+                'hitter' AS player_type,
+                team,
+                player_name,
+                PA,
+                NULL AS OUTS,
+                WAR
+            FROM hitter_season_totals
+            WHERE season = %s AND PA >= %s
+            """,
+            (season, min_pa),
+        )
+    elif table_exists("hitter_season_totals"):
+        hitter_rows = query_all(
+            f"""
+            SELECT
+                'hitter' AS player_type,
+                team,
+                player_name,
+                PA,
+                NULL AS OUTS,
+                ROUND(((OPS - {OPS_WAR_FALLBACK_BASELINE}) * PA) / {OPS_WAR_FALLBACK_DIVISOR}, 2) AS WAR
+            FROM hitter_season_totals
+            WHERE season = %s AND PA >= %s
+            """,
+            (season, min_pa),
+        )
+
+    pitcher_rows: list[dict[str, Any]] = []
+    if table_exists("pitcher_season_totals"):
+        pitcher_rows = query_all(
+            """
+            SELECT
+                'pitcher' AS player_type,
+                team,
+                player_name,
+                NULL AS PA,
+                OUTS,
+                ROUND(COALESCE(pitcher_war, WAR), 2) AS WAR
+            FROM pitcher_season_totals
+            WHERE season = %s AND OUTS >= %s
+            """,
+            (season, min_outs),
+        )
+
+    combined = hitter_rows + pitcher_rows
+    combined.sort(
+        key=lambda row: (
+            -(float(row.get("WAR") or 0)),
+            -(int(row.get("PA") or 0)),
+            -(int(row.get("OUTS") or 0)),
+            str(row.get("player_name") or ""),
+        )
+    )
+    return combined[:limit]
 
 
 def top_era_rows(season: int, limit: int = 5, min_outs: int = 15) -> list[dict[str, Any]]:
@@ -1357,6 +1489,61 @@ def team_leaders_hr(season: int, team: str, min_pa: int, limit: int = 10) -> lis
         LIMIT %s
         """,
         (season, team, min_pa, limit),
+    )
+
+
+def team_leaders_era(season: int, team: str, min_outs: int = 3, limit: int = 10) -> list[dict[str, Any]]:
+    """팀 내 투수 주요 기록 (ERA 기준)."""
+    if not table_exists("pitcher_season_totals"):
+        return []
+    return query_all(
+        """
+        SELECT
+            player_name,
+            SUM(games) AS games,
+            SUM(W) AS W,
+            SUM(L) AS L,
+            SUM(SV) AS SV,
+            SUM(HLD) AS HLD,
+            SUM(OUTS) AS OUTS,
+            ROUND(SUM(OUTS) / 3.0, 1) AS IP,
+            MAX(ERA) AS ERA,
+            MAX(WHIP) AS WHIP,
+            MAX(K9) AS K9
+        FROM pitcher_season_totals
+        WHERE season = %s AND TRIM(team) = TRIM(%s) AND OUTS >= %s
+        GROUP BY player_name
+        ORDER BY MAX(ERA) ASC, SUM(OUTS) DESC
+        LIMIT %s
+        """,
+        (season, team, min_outs, limit),
+    )
+
+
+def team_leaders_k9(season: int, team: str, min_outs: int = 3, limit: int = 10) -> list[dict[str, Any]]:
+    """팀 내 투수 K/9 리더 (K/9 기준 내림차순)."""
+    if not table_exists("pitcher_season_totals"):
+        return []
+    return query_all(
+        """
+        SELECT
+            player_name,
+            SUM(games) AS games,
+            SUM(W) AS W,
+            SUM(L) AS L,
+            SUM(SV) AS SV,
+            SUM(HLD) AS HLD,
+            ROUND(SUM(OUTS) / 3.0, 1) AS IP,
+            MAX(ERA) AS ERA,
+            MAX(WHIP) AS WHIP,
+            MAX(K9) AS K9
+        FROM pitcher_season_totals
+        WHERE season = %s AND TRIM(team) = TRIM(%s) AND OUTS >= %s
+        GROUP BY player_name
+        ORDER BY MAX(K9) DESC, SUM(OUTS) DESC
+        LIMIT %s
+        """,
+        (season, team, min_outs, limit),
     )
 
 
