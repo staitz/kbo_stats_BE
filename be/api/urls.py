@@ -16,4 +16,5 @@ urlpatterns = [
     path("teams/<str:team>/schedule/", views.team_schedule, name="team_schedule"),
     path("games/", views.games_by_date, name="games_by_date"),
     path("games/<str:game_id>/boxscore/", views.game_boxscore, name="game_boxscore"),
+    path("reports/", views.create_error_report, name="create_error_report"),
 ]

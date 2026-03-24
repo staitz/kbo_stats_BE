@@ -1652,3 +1652,25 @@ def game_boxscore(request, game_id: str):
         )
     except DatabaseError:
         return _error_json("database_error", "failed to load game boxscore", 500)
+
+
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
+import json
+from .models import ErrorReport
+
+@csrf_exempt
+@require_POST
+def create_error_report(request):
+    try:
+        body = json.loads(request.body)
+        report = ErrorReport.objects.create(
+            page=body.get('page', ''),
+            tab=body.get('tab', ''),
+            issue_type=body.get('issue_type', ''),
+            message=body.get('message', ''),
+            reported_url=body.get('reported_url', '')
+        )
+        return JsonResponse({"status": "success", "id": report.id}, status=201)
+    except Exception as e:
+        return JsonResponse({"status": "error", "message": str(e)}, status=400)
