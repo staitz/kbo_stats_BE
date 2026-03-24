@@ -11,7 +11,7 @@ class ErrorReport(models.Model):
     tab = models.CharField(max_length=50, blank=True)
     issue_type = models.CharField(max_length=50)
     message = models.TextField()
-    reported_url = models.URLField(max_length=500, blank=True)
+    reported_url = models.CharField(max_length=500, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='new')
     created_at = models.DateTimeField(auto_now_add=True)
 
