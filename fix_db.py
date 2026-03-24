@@ -1,7 +1,8 @@
 import sqlite3
+import os
 
 def fix_db():
-    db_path = 'c:/Users/user/Desktop/Study/kbo_stat_project/kbo_stat_BE/kbo_stats.db'
+    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kbo_stats.db')
     con = sqlite3.connect(db_path)
     
     tables_to_drop = [
