@@ -6,10 +6,10 @@ def create_indexes():
     con = sqlite3.connect(db_path)
     
     commands = [
-        "CREATE INDEX IF NOT EXISTS idx_hgl_player_id ON hitter_game_logs(player_id);",
-        "CREATE INDEX IF NOT EXISTS idx_pgl_player_id ON pitcher_game_logs(player_id);",
-        "CREATE INDEX IF NOT EXISTS idx_hst_player_id ON hitter_season_totals(player_id);",
-        "CREATE INDEX IF NOT EXISTS idx_pst_player_id ON pitcher_season_totals(player_id);",
+        "CREATE INDEX IF NOT EXISTS idx_hgl_player_name ON hitter_game_logs(player_name);",
+        "CREATE INDEX IF NOT EXISTS idx_pgl_player_name ON pitcher_game_logs(player_name);",
+        "CREATE INDEX IF NOT EXISTS idx_hst_player_name ON hitter_season_totals(player_name);",
+        "CREATE INDEX IF NOT EXISTS idx_pst_player_name ON pitcher_season_totals(player_name);",
         "CREATE INDEX IF NOT EXISTS idx_hgl_date ON hitter_game_logs(game_date);",
         "CREATE INDEX IF NOT EXISTS idx_pgl_date ON pitcher_game_logs(game_date);"
     ]
