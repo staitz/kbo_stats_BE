@@ -21,8 +21,9 @@ JONG = {
     "ㅇ": "ng", "ㅈ": "t", "ㅊ": "t", "ㅋ": "k", "ㅌ": "t", "ㅍ": "p", "ㅎ": "t"
 }
 
-# Hardcoded prominent KBO players for common exceptions
+# Hardcoded KBO player name exceptions (foreign players sourced from DB)
 EXCEPTIONS = {
+    # Korean players (irregular romanization)
     "김도영": "Kim Do-yeong",
     "구자욱": "Koo Ja-wook",
     "최정": "Choi Jeong",
@@ -30,16 +31,54 @@ EXCEPTIONS = {
     "류현진": "Ryu Hyun-jin",
     "양의지": "Yang Eui-ji",
     "박병호": "Park Byung-ho",
-    "에레디아": "Heredia",
-    "소크라테스": "Socrates",
-    "데이비슨": "Davidson",
-    "오스틴": "Austin",
-    "로하스": "Rojas",
     "구본혁": "Koo Bon-hyeok",
     "강백호": "Kang Baek-ho",
+    # Foreign players (all confirmed in DB)
+    "가라비토": "Garabito",
+    "감보아": "Gamboa",
+    "네일": "Neil",
+    "데이비슨": "Davidson",
+    "디아즈": "Diaz",
+    "라일리": "Riley",
+    "레예스": "Reyes",
+    "레이예스": "Reyes",
+    "로건": "Logan",
+    "로젠버그": "Rosenberg",
+    "로하스": "Rojas",
+    "리베라토": "Liberato",
+    "맥브룸": "McBroom",
+    "메르세데스": "Mercedes",
+    "반즈": "Barnes",
+    "벨라스케즈": "Velasquez",
+    "소크라테스": "Socrates",
+    "스톤": "Stone",
+    "스티븐슨": "Stevenson",
+    "알칸타라": "Alcantara",
+    "앤더슨": "Anderson",
+    "에레디아": "Heredia",
+    "에르난데스": "Hernandez",
+    "오스틴": "Austin",
+    "올러": "Oller",
+    "와이스": "Weiss",
+    "웰스": "Wells",
+    "위즈덤": "Wisdom",
+    "잭로그": "Logue",
+    "치리노스": "Chirinos",
+    "카디네스": "Cardines",
+    "케이브": "Cave",
+    "윈": "Wijn",         # 코엔 윈 → compact → 윈
+    "콜어빈": "Irvin",
+    "쿠에바스": "Cuevas",
+    "톨허스트": "Tolhurst",
+    "패트릭": "Patrick",
     "페라자": "Peraza",
     "도슨": "Dawson",
-    "레이예스": "Reyes",
+    "폰세": "Ponce",
+    "푸이그": "Puig",
+    "플로리얼": "Florial",
+    "헤이수스": "Jesus",
+    "화이트": "White",
+    "후라도": "Jurado",
     # Teams
     "기아": "KIA",
     "두산": "Doosan",
@@ -79,7 +118,6 @@ def romanize_korean(text: str) -> str:
 
         syl = ""
         
-        # First character special rules
         if i == 0:
             if char == "김": syl = "Kim"
             elif char == "이": syl = "Lee"
