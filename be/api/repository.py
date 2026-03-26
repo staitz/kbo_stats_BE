@@ -760,7 +760,73 @@ def predictions_latest_rows(
         )
 
 
+def _is_english_query(q: str) -> bool:
+    """Return True if query contains only ASCII letters/spaces (no Korean)."""
+    return bool(q) and all(ord(c) < 128 for c in q)
+
+
 def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[dict[str, Any]]:
+    team_filter_sql = " AND team = %s" if team else ""
+    team_params: list[Any] = [team] if team else []
+
+    if _is_english_query(q):
+        # ── English query: fetch all players, romanize names in Python, filter ──
+        from .romanize import format_player_name  # lazy import
+
+        q_lower = q.strip().lower()
+
+        # Fetch hitters
+        hitter_rows = query_all(
+            f"""
+            SELECT
+                'hitter' AS player_type,
+                team, player_name, PA, AB, H, HR, OPS,
+                CASE WHEN AB > 0 THEN ROUND(1.0 * H / AB, 3) ELSE 0 END AS AVG
+            FROM hitter_season_totals
+            WHERE season = %s{team_filter_sql}
+            ORDER BY
+                CASE WHEN PA >= 100 THEN 1 ELSE 0 END DESC,
+                COALESCE(OPS, 0) DESC, PA DESC
+            """,
+            tuple([season] + team_params),
+        )
+
+        # Fetch pitchers (if table exists)
+        pitcher_rows: list[dict[str, Any]] = []
+        if table_exists("pitcher_season_totals"):
+            pitcher_rows = query_all(
+                f"""
+                SELECT
+                    'pitcher' AS player_type,
+                    team, player_name,
+                    NULL AS PA, NULL AS AB, NULL AS H, NULL AS HR, NULL AS OPS, NULL AS AVG
+                FROM pitcher_season_totals
+                WHERE season = %s{team_filter_sql}
+                ORDER BY OUTS DESC
+                """,
+                tuple([season] + team_params),
+            )
+
+        # In-memory filter by romanized name
+        matched: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in hitter_rows + pitcher_rows:
+            name = str(row.get("player_name") or "").strip()
+            if not name:
+                continue
+            key = f"{row.get('player_type')}:{name}:{row.get('team')}"
+            if key in seen:
+                continue
+            romanized = format_player_name(name, "en").lower()
+            if q_lower in romanized:
+                seen.add(key)
+                matched.append(row)
+            if len(matched) >= limit:
+                break
+
+        return matched[:limit]
+
+    # ── Korean / mixed query: fast SQL LIKE path ──────────────────────────────
     where = ["season = %s", "player_name LIKE %s"]
     params: list[Any] = [season, f"%{q}%"]
     if team:
@@ -768,7 +834,6 @@ def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[
         params.append(team)
     where_sql = " AND ".join(where)
 
-    # Hitter-only when pitcher table is absent
     if not table_exists("pitcher_season_totals"):
         return query_all(
             f"""
@@ -816,6 +881,7 @@ def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[
         """,
         tuple(params + params + [limit]),
     )
+
 
 
 def player_distinct_names(season: int | None = None) -> list[str]:
