@@ -1826,7 +1826,9 @@ def games_by_date_rows(game_date: str, season: int, limit: int) -> list[dict[str
         where.append("substr(game_date, 1, 4) = %s")
         params.append(str(season))
     where_sql = " AND ".join(where)
-    return query_all(
+
+    # 1) Try completed games from hitter_game_logs
+    finished = query_all(
         f"""
         WITH team_scores AS (
             SELECT
@@ -1853,7 +1855,9 @@ def games_by_date_rows(game_date: str, season: int, limit: int) -> list[dict[str
             a.team AS away_team,
             a.runs AS away_score,
             b.team AS home_team,
-            b.runs AS home_score
+            b.runs AS home_score,
+            'finished' AS status,
+            NULL AS game_time
         FROM ranked a
         JOIN ranked b ON a.game_id = b.game_id
         WHERE a.rn = 1 AND b.rn = 2
@@ -1862,6 +1866,42 @@ def games_by_date_rows(game_date: str, season: int, limit: int) -> list[dict[str
         """,
         tuple(params + [limit]),
     )
+    if finished:
+        return finished
+
+    # 2) Fallback: show scheduled games from team_schedule when no logs exist
+    if not table_exists("team_schedule"):
+        return []
+
+    sched_where = []
+    sched_params: list[Any] = []
+    if game_date:
+        sched_where.append("game_date = %s")
+        sched_params.append(game_date)
+    else:
+        sched_where.append("season = %s")
+        sched_params.append(season)
+    sched_where_sql = " AND ".join(sched_where)
+
+    return query_all(
+        f"""
+        SELECT
+            game_date,
+            schedule_key AS game_id,
+            away_team,
+            NULL AS away_score,
+            home_team,
+            NULL AS home_score,
+            COALESCE(status, 'scheduled') AS status,
+            game_time
+        FROM team_schedule
+        WHERE {sched_where_sql}
+        ORDER BY game_time ASC NULLS LAST
+        LIMIT %s
+        """,
+        tuple(sched_params + [limit]),
+    )
+
 
 
 def game_boxscore_rows(game_id: str) -> list[dict[str, Any]]:
