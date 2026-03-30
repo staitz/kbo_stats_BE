@@ -200,35 +200,50 @@ def parse_naver_boxscore(
         for p in players:
             if not isinstance(p, dict):
                 continue
-            name = p.get("playerName")
+            # Naver API uses "name" not "playerName"
+            name = p.get("name") or p.get("playerName")
             if not name:
                 continue
+
+            ab = int(p.get("ab") or 0)
+            h = int(p.get("hit") or 0)
+            hr = int(p.get("hr") or 0)
+            bb = int(p.get("bb") or 0)
+            so = int(p.get("kk") or p.get("so") or 0)
+            r = int(p.get("run") or p.get("r") or 0)
+            rbi = int(p.get("rbi") or 0)
+            sb = int(p.get("sb") or 0)
+            cs = int(p.get("cs") or 0)
+            sh = int(p.get("sh") or 0)
+            sf = int(p.get("sf") or 0)
+            hbp = int(p.get("hp") or p.get("hbp") or 0)
+            gdp = int(p.get("gdp") or 0)
 
             row = {
                 "game_date": game_date,
                 "game_id": game_id,
                 "team": team_key,
                 "player_name": name,
-                "AB": int(p.get("ab") or 0),
-                "H": int(p.get("hit") or 0),
-                "HR": int(p.get("hr") or 0),
-                "BB": int(p.get("bb") or 0),
-                "SO": int(p.get("so") or 0),
-                "R": int(p.get("run") or p.get("r") or 0),
-                "RBI": int(p.get("rbi") or 0),
-                "SB": int(p.get("sb") or 0),
-                "CS": int(p.get("cs") or 0),
-                "SH": int(p.get("sh") or 0),
-                "SF": int(p.get("sf") or 0),
-                "HBP": int(p.get("hp") or 0),
-                "GDP": int(p.get("gdp") or 0),
+                "AB": ab,
+                "H": h,
+                "HR": hr,
+                "BB": bb,
+                "SO": so,
+                "R": r,
+                "RBI": rbi,
+                "SB": sb,
+                "CS": cs,
+                "SH": sh,
+                "SF": sf,
+                "HBP": hbp,
+                "GDP": gdp,
                 "2B": 0,
                 "3B": 0,
                 "PA": 0,
                 "TB": 0,
             }
-            row["PA"] = row["AB"] + row["BB"] + row["HBP"] + row["SH"] + row["SF"]
-            row["TB"] = row["H"] + (3 * row["HR"])
+            row["PA"] = ab + bb + hbp + sh + sf
+            row["TB"] = h + (3 * hr)
             out_rows.append(row)
 
     return out_rows

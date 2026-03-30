@@ -7,7 +7,11 @@ from zoneinfo import ZoneInfo
 
 import requests
 from collector.kbo_api import _make_driver
-from collector.kbo_naver_crawler import fetch_day_schedule, parse_naver_pitcher_boxscore
+from collector.kbo_api import fetch_day_schedule as fetch_kbo_day_schedule
+from collector.kbo_naver_crawler import (
+    fetch_day_schedule as fetch_naver_day_schedule,
+    parse_naver_pitcher_boxscore,
+)
 from collector.kbo_db import (
     DB_PATH,
     init_db,
@@ -145,6 +149,13 @@ def _load_games_from_hitter_logs(conn, game_date: str) -> List[Tuple[str, str, s
     return out
 
 
+def _fetch_schedule_for_date(game_date: str) -> List[dict]:
+    games = fetch_naver_day_schedule(game_date, debug=False)
+    if games:
+        return games
+    return fetch_kbo_day_schedule(game_date, debug=False)
+
+
 def _fetch_rows_from_kbo_boxscore(
     game_date: str,
     game_id: str,
@@ -267,7 +278,7 @@ def collect_for_dates(
             attempt = 0
             while True:
                 try:
-                    games = fetch_day_schedule(game_date, debug=False)
+                    games = _fetch_schedule_for_date(game_date)
                     game_ids: List[Tuple[str, str, str]] = [
                         (g.get("game_id"), g.get("away_team"), g.get("home_team"))
                         for g in games
