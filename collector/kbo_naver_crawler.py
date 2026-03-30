@@ -206,8 +206,8 @@ def parse_naver_boxscore(
                 continue
 
             ab = int(p.get("ab") or 0)
-            h = int(p.get("hit") or 0)
-            hr = int(p.get("hr") or 0)
+            h = int(p.get("hit") or p.get("h") or 0)
+            hr = int(p.get("hr") or p.get("homeRun") or p.get("homerun") or 0)
             bb = int(p.get("bb") or 0)
             so = int(p.get("kk") or p.get("so") or 0)
             r = int(p.get("run") or p.get("r") or 0)
@@ -292,7 +292,7 @@ def parse_naver_pitcher_boxscore(
                 "ER": _safe_int(_pick_value(p, "er")),
                 "BB": _safe_int(_pick_value(p, "bb")),
                 "SO": _safe_int(_pick_value(p, "so", "kk", "k")),
-                "HR": _safe_int(_pick_value(p, "hr")),
+                "HR": _safe_int(_pick_value(p, "hr", "homeRun", "homerun")),
                 "HBP": _safe_int(_pick_value(p, "hp", "hbp")),
                 "BK": _safe_int(_pick_value(p, "bk")),
                 "WP": _safe_int(_pick_value(p, "wp")),
