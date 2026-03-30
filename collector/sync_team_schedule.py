@@ -33,6 +33,12 @@ def _init_table(conn) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_team_schedule_season_key
+        ON team_schedule (season, schedule_key)
+        """
+    )
     conn.commit()
 
 
