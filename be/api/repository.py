@@ -435,23 +435,23 @@ def home_base_totals(season: int) -> dict[str, Any]:
     base = query_one(
         """
         SELECT
-            COUNT(*) AS players,
+            COUNT(DISTINCT player_name) AS players,
             COUNT(DISTINCT team) AS teams,
             COALESCE(SUM(HR), 0) AS total_hr,
             COALESCE(SUM(PA), 0) AS total_pa
         FROM hitter_season_totals
-        WHERE season = %s
+        WHERE season IN (%s, %s)
         """,
-        (season,),
+        (season, season - 1),
     ) or {"players": 0, "teams": 0, "total_hr": 0, "total_pa": 0}
 
     games_row = query_one(
         """
         SELECT COUNT(DISTINCT game_id) AS total_games
         FROM hitter_game_logs
-        WHERE substr(game_date, 1, 4) = %s
+        WHERE substr(game_date, 1, 4) IN (%s, %s)
         """,
-        (str(season),),
+        (str(season), str(season - 1)),
     )
     base["total_games"] = (games_row or {}).get("total_games") or 0
     return base
