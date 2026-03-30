@@ -995,7 +995,7 @@ def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[
             COALESCE(MAX(OPS), 0) DESC, MAX(PA) DESC
         LIMIT %s
         """,
-        tuple(params + [limit]),
+        tuple(params + params + [limit]),
     )
 
 
