@@ -894,15 +894,16 @@ def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[
             f"""
             SELECT
                 'hitter' AS player_type,
-                team, player_name, PA, AB, H, HR, OPS,
-                CASE WHEN AB > 0 THEN ROUND(1.0 * H / AB, 3) ELSE 0 END AS AVG
+                team, player_name, MAX(PA) AS PA, MAX(AB) AS AB, MAX(H) AS H, MAX(HR) AS HR, MAX(OPS) AS OPS,
+                CASE WHEN MAX(AB) > 0 THEN ROUND(1.0 * MAX(H) / MAX(AB), 3) ELSE 0 END AS AVG
             FROM hitter_season_totals
-            WHERE season = %s{team_filter_sql}
+            WHERE season IN (%s, %s){team_filter_sql}
+            GROUP BY team, player_name
             ORDER BY
-                CASE WHEN PA >= 100 THEN 1 ELSE 0 END DESC,
-                COALESCE(OPS, 0) DESC, PA DESC
+                CASE WHEN MAX(PA) >= 100 THEN 1 ELSE 0 END DESC,
+                COALESCE(MAX(OPS), 0) DESC, MAX(PA) DESC
             """,
-            tuple([season] + team_params),
+            tuple([season, season - 1] + team_params),
         )
 
         # Fetch pitchers (if table exists)
@@ -915,10 +916,11 @@ def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[
                     team, player_name,
                     NULL AS PA, NULL AS AB, NULL AS H, NULL AS HR, NULL AS OPS, NULL AS AVG
                 FROM pitcher_season_totals
-                WHERE season = %s{team_filter_sql}
-                ORDER BY OUTS DESC
+                WHERE season IN (%s, %s){team_filter_sql}
+                GROUP BY team, player_name
+                ORDER BY MAX(OUTS) DESC
                 """,
-                tuple([season] + team_params),
+                tuple([season, season - 1] + team_params),
             )
 
         # In-memory filter by romanized name
@@ -941,8 +943,8 @@ def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[
         return matched[:limit]
 
     # ── Korean / mixed query: fast SQL LIKE path ──────────────────────────────
-    where = ["season = %s", "player_name LIKE %s"]
-    params: list[Any] = [season, f"%{q}%"]
+    where = ["season IN (%s, %s)", "player_name LIKE %s"]
+    params: list[Any] = [season, season - 1, f"%{q}%"]
     if team:
         where.append("team = %s")
         params.append(team)
@@ -953,14 +955,15 @@ def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[
             f"""
             SELECT
                 'hitter' AS player_type,
-                team, player_name, PA, AB, H, HR, OPS,
-                CASE WHEN AB > 0 THEN ROUND(1.0 * H / AB, 3) ELSE 0 END AS AVG
+                team, player_name, MAX(PA) AS PA, MAX(AB) AS AB, MAX(H) AS H, MAX(HR) AS HR, MAX(OPS) AS OPS,
+                CASE WHEN MAX(AB) > 0 THEN ROUND(1.0 * MAX(H) / MAX(AB), 3) ELSE 0 END AS AVG
             FROM hitter_season_totals
             WHERE {where_sql}
+            GROUP BY team, player_name
             ORDER BY
-                CASE WHEN PA >= 100 THEN 1 ELSE 0 END DESC,
-                CASE WHEN AB > 0 THEN 1.0 * H / AB ELSE 0 END DESC,
-                COALESCE(OPS, 0) DESC, PA DESC
+                CASE WHEN MAX(PA) >= 100 THEN 1 ELSE 0 END DESC,
+                CASE WHEN MAX(AB) > 0 THEN 1.0 * MAX(H) / MAX(AB) ELSE 0 END DESC,
+                COALESCE(MAX(OPS), 0) DESC, MAX(PA) DESC
             LIMIT %s
             """,
             tuple(params + [limit]),
@@ -968,7 +971,7 @@ def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[
 
     return query_all(
         f"""
-        SELECT player_type, team, player_name, PA, AB, H, HR, OPS, AVG
+        SELECT player_type, team, player_name, MAX(PA) AS PA, MAX(AB) AS AB, MAX(H) AS H, MAX(HR) AS HR, MAX(OPS) AS OPS, MAX(AVG) AS AVG
         FROM (
             SELECT
                 'hitter' AS player_type,
@@ -984,16 +987,15 @@ def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[
             FROM pitcher_season_totals
             WHERE {where_sql}
         )
+        GROUP BY player_type, team, player_name
         ORDER BY
-            CASE WHEN player_type = 'hitter' AND PA >= 100 THEN 2
+            CASE WHEN player_type = 'hitter' AND MAX(PA) >= 100 THEN 2
                  WHEN player_type = 'hitter' THEN 1
                  ELSE 0 END DESC,
-            CASE WHEN player_type = 'hitter' AND AB > 0 THEN 1.0 * H / AB ELSE 0.0 END DESC,
-            COALESCE(OPS, 0.0) DESC,
-            COALESCE(PA, 0) DESC
+            COALESCE(MAX(OPS), 0) DESC, MAX(PA) DESC
         LIMIT %s
         """,
-        tuple(params + params + [limit]),
+        tuple(params + [limit]),
     )
 
 
