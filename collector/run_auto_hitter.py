@@ -31,7 +31,7 @@ def _read_latest_game_date(conn) -> str:
         LIMIT 1
         """
     )
-    return str(row_value(row, "game_date", row[0] if row else "") or "")
+    return str(row_value(row, "game_date", "") or "")
 
 
 def _parse_args() -> argparse.Namespace:
