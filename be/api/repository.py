@@ -216,6 +216,41 @@ def available_seasons() -> list[int]:
 
 
 def _team_game_rows(season: int) -> list[dict[str, Any]]:
+    # 1순위: pitcher_game_logs의 실제 W/L 컬럼으로 승패 판정 (KBO 공식 기준)
+    #   - 해당 게임에서 팀 투수들의 W 합계 > 0 이면 승, L 합계 > 0 이면 패, 둘 다 0이면 무
+    # 2순위(폴백): pitcher_game_logs 없을 경우 hitter_game_logs R 합계로 추론
+    if table_exists("pitcher_game_logs"):
+        return query_all(
+            """
+            WITH pitcher_results AS (
+                SELECT
+                    game_date,
+                    game_id,
+                    team,
+                    COALESCE(SUM(W), 0) AS team_wins,
+                    COALESCE(SUM(L), 0) AS team_losses
+                FROM pitcher_game_logs
+                WHERE substr(game_date, 1, 4) = %s
+                GROUP BY game_date, game_id, team
+            )
+            SELECT
+                a.game_date,
+                a.game_id,
+                a.team AS team,
+                b.team AS opp_team,
+                CASE
+                    WHEN a.team_wins > 0 THEN 'W'
+                    WHEN a.team_losses > 0 THEN 'L'
+                    ELSE 'D'
+                END AS result
+            FROM pitcher_results a
+            JOIN pitcher_results b ON a.game_id = b.game_id AND a.team <> b.team
+            ORDER BY a.game_date DESC, a.game_id DESC
+            """,
+            (str(season),),
+        )
+
+    # 폴백: hitter_game_logs R 합계로 추론
     return query_all(
         """
         WITH team_scores AS (
@@ -246,6 +281,7 @@ def _team_game_rows(season: int) -> list[dict[str, Any]]:
         """,
         (str(season),),
     )
+
 
 
 def computed_standings_rows(season: int) -> list[dict[str, Any]]:
