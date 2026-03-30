@@ -1,7 +1,13 @@
 import argparse
+import sys
+from pathlib import Path
 from typing import List
 
+# Ensure the project root (kbo_stat_BE) is on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from db_support import connect_for_path, execute, executemany, is_postgres, row_value, table_columns, table_exists
+
 
 RUNS_PER_WIN = 10.0
 SP_REP_GAP = 0.8
@@ -64,6 +70,14 @@ def ensure_table(conn) -> None:
     for col, col_def in required.items():
         if col.lower() not in existing:
             conn.execute(f"ALTER TABLE pitcher_season_totals ADD COLUMN {safe_col(col)} {col_def}")
+    # 구버전 테이블에 UNIQUE 인덱스가 없으면 ON CONFLICT 절이 실패하므로 보장
+    if not is_postgres(conn):
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_pitcher_season_totals
+            ON pitcher_season_totals (season, team, player_name)
+            """
+        )
     conn.commit()
 
 
