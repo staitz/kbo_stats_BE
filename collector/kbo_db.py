@@ -3,6 +3,8 @@ from typing import Any, Dict, Iterable, List, Tuple
 from db_support import connect, executemany, is_postgres, table_columns
 
 DB_PATH = "kbo_stats.db"
+HITTER_UNIQUE_INDEX = "uq_hitter_game_logs_game_team_player"
+PITCHER_UNIQUE_INDEX = "uq_pitcher_game_logs_game_team_player"
 
 
 REQUIRED_COLUMNS = {
@@ -92,6 +94,7 @@ def init_db(conn) -> None:
         )
         """
     )
+    _ensure_unique_indexes(conn)
     conn.commit()
 
 
@@ -104,6 +107,7 @@ def migrate_columns(conn) -> None:
         # 숫자로 시작하는 컬럼명(예: 2B, 3B)은 반드시 따옴표로 감싸야 한다
         safe_col = f'"{col}"' if col[0].isdigit() else col
         conn.execute(f"ALTER TABLE hitter_game_logs ADD COLUMN {safe_col} {col_def}")
+    _ensure_unique_indexes(conn)
     conn.commit()
 
 
@@ -113,7 +117,23 @@ def migrate_pitcher_columns(conn) -> None:
         if col.lower() in existing:
             continue
         conn.execute(f"ALTER TABLE pitcher_game_logs ADD COLUMN {col} {col_def}")
+    _ensure_unique_indexes(conn)
     conn.commit()
+
+
+def _ensure_unique_indexes(conn) -> None:
+    conn.execute(
+        f"""
+        CREATE UNIQUE INDEX IF NOT EXISTS {HITTER_UNIQUE_INDEX}
+        ON hitter_game_logs (game_id, team, player_name)
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE UNIQUE INDEX IF NOT EXISTS {PITCHER_UNIQUE_INDEX}
+        ON pitcher_game_logs (game_id, team, player_name)
+        """
+    )
 
 
 def _row_to_values(row: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -275,6 +295,7 @@ def insert_pitcher_rows(conn, rows: Iterable[Dict[str, Any]], upsert: bool = Fal
             WP=excluded.WP,
             ERA=excluded.ERA
         """,
+        values,
     )
     conn.commit()
     return (getattr(conn, "total_changes", 0) - before) if not is_postgres(conn) else len(values)
