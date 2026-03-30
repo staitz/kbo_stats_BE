@@ -146,7 +146,7 @@ def _fetch_rows_from_kbo_boxscore(
             rbi = _safe_int(stat_cells[3])
             doubles = _count_tokens(event_tokens, ("2루타", "우2", "좌2", "중2"))
             triples = _count_tokens(event_tokens, ("3루타", "우3", "좌3", "중3"))
-            hr = _count_tokens(event_tokens, ("홈런",))
+            hr = _count_tokens(event_tokens, ("홈런", "우홈", "좌홈", "중홈", "좌중홈", "우중홈", "그홈"))
             bb = _count_tokens(event_tokens, ("4구", "볼넷"))
             so = _count_tokens(event_tokens, ("삼진",))
             sh = _count_tokens(event_tokens, ("희번", "희생번트", "희타"))
