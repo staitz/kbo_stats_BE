@@ -30,6 +30,8 @@ def load_env_file(env_path: Path = ENV_PATH) -> None:
 def should_use_postgres() -> bool:
     load_env_file()
     use_postgres = os.getenv("USE_POSTGRES", "").strip().lower()
+    if use_postgres in {"0", "false", "no", "off"}:
+        return False
     if use_postgres in {"1", "true", "yes", "on"}:
         return True
     return bool(os.getenv("DATABASE_URL", "").strip() or os.getenv("POSTGRES_DB", "").strip())
