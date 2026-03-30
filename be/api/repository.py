@@ -309,12 +309,19 @@ def computed_standings_rows(season: int) -> list[dict[str, Any]]:
     leader_wins = int(standings[0]["wins"])
     leader_losses = int(standings[0]["losses"])
 
-    for idx, row in enumerate(standings, start=1):
+    # 공동 순위(competition ranking): 동일 승률이면 같은 순위, 다음은 건너뜀 (1,1,3 방식)
+    current_rank = 1
+    for idx, row in enumerate(standings):
         gb = ((leader_wins - int(row["wins"])) + (int(row["losses"]) - leader_losses)) / 2.0
-        row["rank"] = idx
+        if idx > 0:
+            prev = standings[idx - 1]
+            if float(row["win_pct"]) < float(prev["win_pct"]):
+                current_rank = idx + 1
+        row["rank"] = current_rank
         row["gb"] = round(gb, 1)
 
     return standings
+
 
 
 def home_base_totals(season: int) -> dict[str, Any]:
