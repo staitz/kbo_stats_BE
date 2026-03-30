@@ -69,6 +69,19 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
+def _blend_value(anchor: float, current: float, exposure: float, k: float) -> float:
+    weight = exposure / (exposure + k) if k > 0 else 1.0
+    weight = _clamp(weight, 0.0, 1.0)
+    return ((1.0 - weight) * anchor) + (weight * current)
+
+
+def _team_progress(season: int, team: str) -> float:
+    team_games = repo.max_team_games(season, team) if team else 0
+    if team_games <= 0:
+        return 0.0
+    return _clamp(float(team_games) / 144.0, 0.0, 1.0)
+
+
 def _classify_status(raw_status: str | None, result: str | None) -> str:
     """Classify a raw Naver statusInfo string into a normalized category.
 
@@ -111,6 +124,8 @@ def _classify_status(raw_status: str | None, result: str | None) -> str:
 def _estimate_hitter_projection(
     latest_prediction: dict[str, Any] | None,
     current_agg: dict[str, Any] | None,
+    current_row: dict[str, Any] | None,
+    prior_row: dict[str, Any] | None,
     season: int,
 ) -> dict[str, Any] | None:
     if not current_agg:
@@ -122,16 +137,23 @@ def _estimate_hitter_projection(
     season_games = 144
     pace_factor = float(season_games) / float(team_games) if team_games > 0 else 1.0
     pace_factor = _clamp(pace_factor, 1.0, 2.5)
+    progress = _team_progress(season, team)
 
     hits_to_date = float(current_agg.get("H") or 0)
     rbi_to_date = float(current_agg.get("RBI") or 0)
-    enriched["predicted_hits_final"] = round(hits_to_date * pace_factor)
-    enriched["predicted_rbi_final"] = round(rbi_to_date * pace_factor)
+    pa_to_date = float(enriched.get("pa_to_date") or current_agg.get("PA") or 0)
+    prior_hits = float((prior_row or {}).get("H") or 0)
+    prior_rbi = float((prior_row or {}).get("RBI") or 0)
+    current_hits_full = hits_to_date * pace_factor
+    current_rbi_full = rbi_to_date * pace_factor
+    predicted_hits = _blend_value(prior_hits, current_hits_full, pa_to_date, 220.0)
+    predicted_rbi = _blend_value(prior_rbi, current_rbi_full, pa_to_date, 180.0)
+    enriched["predicted_hits_final"] = max(round(predicted_hits), int(round(hits_to_date)))
+    enriched["predicted_rbi_final"] = max(round(predicted_rbi), int(round(rbi_to_date)))
 
     # Award probabilities should reflect only actual model-backed hitter rows.
     # If the player has no model prediction row or the sample is too small,
     # keep the probabilities at zero instead of inferring them from fallbacks.
-    pa_to_date = float(enriched.get("pa_to_date") or 0)
     # Fallback: if hitter_predictions didn't store pa_to_date, use the
     # actual PA from the season aggregate (hitter_season_totals).
     if pa_to_date == 0 and current_agg:
@@ -196,14 +218,16 @@ def _estimate_hitter_projection(
     mvp_prob = ((percentile ** 2.6) * 0.42) + (max(0.0, war_ratio - 0.7) * 0.30)
     gg_prob = (percentile * 0.72) + (max(0.0, war_ratio - 0.55) * 0.25)
 
-    enriched["mvp_probability"] = round(_clamp(mvp_prob, 0.01, 0.65), 4)
-    enriched["golden_glove_probability"] = round(_clamp(gg_prob, 0.05, 0.92), 4)
+    season_damp = progress ** 1.35
+    enriched["mvp_probability"] = round(_clamp(mvp_prob * season_damp, 0.0, 0.65), 4)
+    enriched["golden_glove_probability"] = round(_clamp(gg_prob * season_damp, 0.0, 0.92), 4)
     return enriched
 
 
 def _estimate_hitter_pace_projection(
     current_agg: dict[str, Any] | None,
     current_row: dict[str, Any] | None,
+    prior_row: dict[str, Any] | None,
     season: int,
 ) -> dict[str, Any] | None:
     if not current_agg:
@@ -231,6 +255,11 @@ def _estimate_hitter_pace_projection(
     rbi_to_date = float(current_agg.get("RBI") or 0)
     ops_to_date = float(current_agg.get("OPS") or 0)
     war_to_date = float((current_row or {}).get("WAR") or 0)
+    prior_hr = float((prior_row or {}).get("HR") or 0)
+    prior_hits = float((prior_row or {}).get("H") or 0)
+    prior_rbi = float((prior_row or {}).get("RBI") or 0)
+    prior_ops = float((prior_row or {}).get("OPS") or 0)
+    prior_war = float((prior_row or {}).get("WAR") or 0)
     latest_prediction_date = repo.latest_prediction_date(season) if repo.table_exists("hitter_predictions") else None
 
     return {
@@ -241,15 +270,20 @@ def _estimate_hitter_pace_projection(
         "confidence_score": round(confidence_score, 4),
         "confidence_level": confidence_level,
         "pa_to_date": round(pa_to_date, 1),
-        "predicted_hr_final": round(hr_to_date * pace_factor),
-        "predicted_ops_final": round(ops_to_date, 3),
-        "predicted_war_final": round(war_to_date * pace_factor, 3),
-        "predicted_hits_final": round(hits_to_date * pace_factor),
-        "predicted_rbi_final": round(rbi_to_date * pace_factor),
+        "predicted_hr_final": max(round(_blend_value(prior_hr, hr_to_date * pace_factor, pa_to_date, 180.0)), int(round(hr_to_date))),
+        "predicted_ops_final": round(_clamp(_blend_value(prior_ops, ops_to_date, pa_to_date, 220.0), 0.45, 1.05), 3),
+        "predicted_war_final": round(_clamp(_blend_value(prior_war, war_to_date * pace_factor, pa_to_date, 260.0), -1.0, 12.0), 3),
+        "predicted_hits_final": max(round(_blend_value(prior_hits, hits_to_date * pace_factor, pa_to_date, 220.0)), int(round(hits_to_date))),
+        "predicted_rbi_final": max(round(_blend_value(prior_rbi, rbi_to_date * pace_factor, pa_to_date, 180.0)), int(round(rbi_to_date))),
     }
 
 
-def _estimate_pitcher_projection(current_agg: dict[str, Any] | None, season: int) -> dict[str, Any] | None:
+def _estimate_pitcher_projection(
+    current_agg: dict[str, Any] | None,
+    current_row: dict[str, Any] | None,
+    prior_row: dict[str, Any] | None,
+    season: int,
+) -> dict[str, Any] | None:
     if not current_agg:
         return None
 
@@ -279,23 +313,40 @@ def _estimate_pitcher_projection(current_agg: dict[str, Any] | None, season: int
     h_to_date = float(current_agg.get("H") or 0)
     bb_to_date = float(current_agg.get("BB") or 0)
     er_to_date = float(current_agg.get("ER") or 0)
+    prior_ip = float((prior_row or {}).get("IP") or 0)
+    prior_w = float((prior_row or {}).get("W") or 0)
+    prior_l = float((prior_row or {}).get("L") or 0)
+    prior_sv = float((prior_row or {}).get("SV") or 0)
+    prior_hld = float((prior_row or {}).get("HLD") or 0)
+    prior_so = float((prior_row or {}).get("SO") or 0)
+    prior_h = float((prior_row or {}).get("H") or 0)
+    prior_bb = float((prior_row or {}).get("BB") or 0)
+    prior_er = float((prior_row or {}).get("ER") or 0)
+    prior_era = float((prior_row or {}).get("ERA") or 0)
+    prior_whip = float((prior_row or {}).get("WHIP") or 0)
+    prior_k9 = float((prior_row or {}).get("K9") or 0)
+    prior_bb9 = float((prior_row or {}).get("BB9") or 0)
+    prior_kbb = float((prior_row or {}).get("KBB") or 0) if (prior_row or {}).get("KBB") is not None else None
+    prior_war = float((prior_row or {}).get("WAR") or 0)
 
-    projected_outs = round(outs_to_date * pace_factor)
+    projected_outs = round(_blend_value(prior_ip * 3.0, outs_to_date * pace_factor, outs_to_date, 120.0))
     projected_ip = round(projected_outs / 3.0, 1)
-    projected_wins = round(wins_to_date * pace_factor)
-    projected_losses = round(losses_to_date * pace_factor)
-    projected_saves = round(saves_to_date * pace_factor)
-    projected_holds = round(holds_to_date * pace_factor)
-    projected_so = round(so_to_date * pace_factor)
-    projected_h = round(h_to_date * pace_factor)
-    projected_bb = round(bb_to_date * pace_factor)
-    projected_er = round(er_to_date * pace_factor)
+    projected_wins = round(_blend_value(prior_w, wins_to_date * pace_factor, outs_to_date, 90.0))
+    projected_losses = round(_blend_value(prior_l, losses_to_date * pace_factor, outs_to_date, 90.0))
+    projected_saves = round(_blend_value(prior_sv, saves_to_date * pace_factor, outs_to_date, 75.0))
+    projected_holds = round(_blend_value(prior_hld, holds_to_date * pace_factor, outs_to_date, 75.0))
+    projected_so = round(_blend_value(prior_so, so_to_date * pace_factor, outs_to_date, 120.0))
+    projected_h = round(_blend_value(prior_h, h_to_date * pace_factor, outs_to_date, 120.0))
+    projected_bb = round(_blend_value(prior_bb, bb_to_date * pace_factor, outs_to_date, 120.0))
+    projected_er = round(_blend_value(prior_er, er_to_date * pace_factor, outs_to_date, 120.0))
 
-    projected_era = float(current_agg.get("ERA") or 0)
-    projected_whip = float(current_agg.get("WHIP") or 0)
-    projected_k9 = float(current_agg.get("K9") or 0)
-    projected_bb9 = float(current_agg.get("BB9") or 0)
-    projected_kbb = float(current_agg.get("KBB") or 0) if current_agg.get("KBB") is not None else None
+    projected_era = _clamp(_blend_value(prior_era, float(current_agg.get("ERA") or 0), outs_to_date, 180.0), 1.5, 8.5)
+    projected_whip = _clamp(_blend_value(prior_whip, float(current_agg.get("WHIP") or 0), outs_to_date, 180.0), 0.7, 2.2)
+    projected_k9 = _clamp(_blend_value(prior_k9, float(current_agg.get("K9") or 0), outs_to_date, 180.0), 3.0, 14.0)
+    projected_bb9 = _clamp(_blend_value(prior_bb9, float(current_agg.get("BB9") or 0), outs_to_date, 180.0), 0.5, 7.0)
+    current_kbb = float(current_agg.get("KBB") or 0) if current_agg.get("KBB") is not None else 0.0
+    projected_kbb = _clamp(_blend_value(prior_kbb or 0.0, current_kbb, outs_to_date, 180.0), 0.5, 10.0) if (prior_kbb is not None or current_agg.get("KBB") is not None) else None
+    projected_war = _clamp(_blend_value(prior_war, float((current_row or {}).get("WAR") or 0) * pace_factor, outs_to_date, 220.0), -1.0, 10.0)
 
     return {
         "player_name": current_agg.get("player_name"),
@@ -324,6 +375,9 @@ def _estimate_pitcher_projection(current_agg: dict[str, Any] | None, season: int
         "predicted_k9_final": round(projected_k9, 2),
         "predicted_bb9_final": round(projected_bb9, 2),
         "predicted_kbb_final": round(projected_kbb, 2) if projected_kbb is not None else None,
+        "predicted_war_final": round(projected_war, 3),
+        "ip_to_date": round(ip_to_date, 3),
+        "so_to_date": float(so_to_date or 0),
     }
 
 
@@ -533,8 +587,9 @@ def _estimate_pitcher_awards(
             + (_clamp(era_bonus, 0.0, 1.15) * 0.20)
         )
 
-    enriched["mvp_probability"] = round(_clamp(mvp_prob, 0.005, 0.55), 4)
-    enriched["golden_glove_probability"] = round(_clamp(gg_prob, 0.03, 0.82), 4)
+    season_damp = _team_progress(season, team) ** 1.35
+    enriched["mvp_probability"] = round(_clamp(mvp_prob * season_damp, 0.0, 0.55), 4)
+    enriched["golden_glove_probability"] = round(_clamp(gg_prob * season_damp, 0.0, 0.82), 4)
     return enriched
 
 
@@ -1146,6 +1201,7 @@ def player_detail(request, player_id: str):
             current_agg = None
             latest_prediction = None
             totals_prediction = current_rows[0] if current_rows else (season_rows[0] if season_rows else None)
+            prior_pitcher_row = next((row for row in season_rows if int(row.get("season") or 0) < effective_season), None)
             if repo.table_exists("pitcher_game_logs"):
                 monthly = repo.pitcher_player_monthly_rows(player_name=pitcher_name, season=effective_season, team=target_team)
                 current_agg = repo.pitcher_player_current_aggregate(
@@ -1157,7 +1213,12 @@ def player_detail(request, player_id: str):
                     current_agg = None
                 if current_agg is not None:
                     current_agg["player_name"] = pitcher_name
-                pace_prediction = _estimate_pitcher_projection(current_agg=current_agg, season=effective_season)
+                pace_prediction = _estimate_pitcher_projection(
+                    current_agg=current_agg,
+                    current_row=totals_prediction,
+                    prior_row=prior_pitcher_row,
+                    season=effective_season,
+                )
                 if repo.table_exists("pitcher_predictions"):
                     latest_prediction = repo.pitcher_player_latest_prediction(
                         season=effective_season,
@@ -1353,9 +1414,11 @@ def player_detail(request, player_id: str):
                 current_agg["team"] = target_team
             elif current_rows:
                 current_agg["team"] = current_rows[0].get("team")
+        prior_row = next((row for row in season_rows if int(row.get("season") or 0) < effective_season), None)
         pace_prediction = _estimate_hitter_pace_projection(
             current_agg=current_agg,
             current_row=current_rows[0] if current_rows else (season_rows[0] if season_rows else None),
+            prior_row=prior_row,
             season=effective_season,
         )
         if latest_prediction is None:
@@ -1367,6 +1430,8 @@ def player_detail(request, player_id: str):
         latest_prediction = _estimate_hitter_projection(
             latest_prediction=latest_prediction,
             current_agg=current_agg,
+            current_row=current_rows[0] if current_rows else (season_rows[0] if season_rows else None),
+            prior_row=prior_row,
             season=effective_season,
         )
 
