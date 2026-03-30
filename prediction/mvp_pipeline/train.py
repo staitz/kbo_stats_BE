@@ -15,7 +15,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
     raise SystemExit("lightgbm is required. Install it with `pip install lightgbm`.") from exc
 
 from .config import AppConfig, get_config
-from .db import load_hitter_game_logs
+from .db import load_hitter_game_logs, resolve_training_seasons
 from .features import HitterFeatureBuilder, make_train_valid_test_split, prepare_model_matrix
 from .schema import MODEL_VERSION, SCHEMA_VERSION, build_schema
 
@@ -150,7 +150,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train hitter MVP models.")
     parser.add_argument("--input", type=str, default=None, help="CSV, parquet, or sqlite DB path. If omitted, project DB is used.")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory for trained models.")
-    parser.add_argument("--season", type=int, default=2025, help="Season to train from when reading sqlite.")
+    parser.add_argument("--season", type=int, default=2025, help="Train using all available seasons up to and including this year when reading sqlite.")
     # Sampling policy overrides (each overrides the corresponding DataConfig default)
     parser.add_argument(
         "--sampling-mode",
@@ -184,7 +184,15 @@ def main() -> None:
     if args.min_pa_threshold is not None:
         cfg.data.min_pa_threshold = args.min_pa_threshold
 
-    game_logs = load_hitter_game_logs(args.input, args.season)
+    input_path = Path(args.input) if args.input else None
+    if input_path is None or input_path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+        db_path = input_path or (Path(__file__).resolve().parents[2] / "kbo_stats.db")
+        training_seasons = resolve_training_seasons(db_path, args.season)
+        print(json.dumps({"training_seasons": training_seasons}, ensure_ascii=False))
+        game_logs = load_hitter_game_logs(str(db_path) if input_path else None, training_seasons)
+    else:
+        print(json.dumps({"training_seasons": [args.season], "mode": "file_input"}, ensure_ascii=False))
+        game_logs = load_hitter_game_logs(args.input, args.season)
     meta = train_hitter_targets(game_logs, cfg, args.output_dir)
     print(json.dumps(meta, ensure_ascii=False, indent=2))
 

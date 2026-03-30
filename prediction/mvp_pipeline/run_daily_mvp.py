@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from .config import get_config
-from .db import load_hitter_game_logs
+from .db import load_hitter_game_logs, resolve_training_seasons
 from .predict import (
     MODE_PREDICTION,
     MODE_PROJECTION,
@@ -53,13 +53,18 @@ def main() -> None:
     cfg = get_config()
 
     try:
-        data_season = args.season - 1 if args.mode == MODE_PROJECTION else args.season
-        game_logs = load_hitter_game_logs(args.input, data_season)
+        if args.mode == MODE_PROJECTION:
+            data_seasons = resolve_training_seasons(args.input or (Path(__file__).resolve().parents[2] / "kbo_stats.db"), args.season - 1)
+        else:
+            historical_seasons = resolve_training_seasons(args.input or (Path(__file__).resolve().parents[2] / "kbo_stats.db"), args.season - 1)
+            data_seasons = sorted(set(historical_seasons + [args.season]))
+        game_logs = load_hitter_game_logs(args.input, data_seasons)
         pred_df = predict_hitter_targets(
             game_logs=game_logs,
             config=cfg,
             model_dir=args.model_dir,
             as_of_date=args.as_of_date,
+            target_season=args.season,
             mode=args.mode,
             allow_missing_features=args.allow_missing_features,
         )
@@ -75,7 +80,7 @@ def main() -> None:
         upserted = 0
         if not args.skip_db:
             db_path = args.db_path or (Path(__file__).resolve().parents[2] / "kbo_stats.db")
-            model_season = data_season
+            model_season = max(data_seasons) if args.mode == MODE_PROJECTION else max(s for s in data_seasons if s < args.season)
             upserted = upsert_predictions_to_db(
                 pred_df=pred_df,
                 db_path=db_path,

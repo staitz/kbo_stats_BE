@@ -140,6 +140,7 @@ class HitterFeatureBuilder:
         df = game_logs.copy()
         df["game_date"] = pd.to_datetime(df["game_date"])
         df["player_key"] = df["team"].astype(str) + "::" + df["player_name"].astype(str)
+        df["season_player_key"] = df["season"].astype(str) + "::" + df["player_key"]
 
         numeric_base_cols = ["PA", "AB", "H", "2B", "3B", "HR", "BB", "SO", "HBP", "SF", "TB"]
         for col in numeric_base_cols:
@@ -213,8 +214,8 @@ class HitterFeatureBuilder:
             if col not in df.columns:
                 df[col] = default
 
-        df = df.sort_values(["player_key", "game_date", "team"]).reset_index(drop=True)
-        grp = df.groupby("player_key", sort=False, group_keys=False)
+        df = df.sort_values(["season", "player_key", "game_date", "team"]).reset_index(drop=True)
+        grp = df.groupby("season_player_key", sort=False, group_keys=False)
         df["game_no"] = grp.cumcount() + 1
 
         cum_cols = ["PA", "AB", "H", "2B", "3B", "HR", "BB", "SO", "HBP", "SF", "TB", "war_game"]
@@ -280,6 +281,70 @@ class HitterFeatureBuilder:
         df["park_factor_avg"] = grp["park_factor"].expanding().mean().reset_index(level=0, drop=True)
         df["opponent_pitching_strength_avg"] = grp["opponent_pitching_strength"].expanding().mean().reset_index(level=0, drop=True)
 
+        season_final = (
+            df.groupby(["season", "team", "player_name"], as_index=False)
+            .agg(
+                prev_season_pa=("PA_cum", "last"),
+                prev_season_ops=("OPS_to_date", "last"),
+                prev_season_hr=("HR_cum", "last"),
+                prev_season_war=("WAR_to_date", "last"),
+            )
+        )
+        season_final["season"] = season_final["season"] + 1
+        df = df.merge(season_final, on=["season", "team", "player_name"], how="left")
+
+        history_base = (
+            df.groupby(["season", "team", "player_name"], as_index=False)
+            .agg(
+                hist_pa=("PA_cum", "last"),
+                hist_ops=("OPS_to_date", "last"),
+                hist_hr=("HR_cum", "last"),
+                hist_war=("WAR_to_date", "last"),
+            )
+            .sort_values(["team", "player_name", "season"])
+        )
+        history_base["hist_hr_rate"] = _safe_divide(history_base["hist_hr"], history_base["hist_pa"]).fillna(0.0)
+        history_base["weighted_hist_ops_sum"] = history_base["hist_ops"] * history_base["hist_pa"]
+        history_base["weighted_hist_hr_rate_sum"] = history_base["hist_hr_rate"] * history_base["hist_pa"]
+        history_grp = history_base.groupby(["team", "player_name"], sort=False, group_keys=False)
+        history_base["career_pa"] = history_grp["hist_pa"].cumsum() - history_base["hist_pa"]
+        history_base["career_hr"] = history_grp["hist_hr"].cumsum() - history_base["hist_hr"]
+        history_base["career_war"] = history_grp["hist_war"].cumsum() - history_base["hist_war"]
+        history_base["career_ops_num"] = history_grp["weighted_hist_ops_sum"].cumsum() - history_base["weighted_hist_ops_sum"]
+        history_base["career_hr_rate_num"] = (
+            history_grp["weighted_hist_hr_rate_sum"].cumsum() - history_base["weighted_hist_hr_rate_sum"]
+        )
+        history_base["career_ops"] = _safe_divide(history_base["career_ops_num"], history_base["career_pa"]).fillna(0.0)
+        history_base["career_hr_rate"] = _safe_divide(history_base["career_hr_rate_num"], history_base["career_pa"]).fillna(0.0)
+        history_base["career_war_per_pa"] = _safe_divide(history_base["career_war"], history_base["career_pa"]).fillna(0.0)
+        history_cols = [
+            "season",
+            "team",
+            "player_name",
+            "career_pa",
+            "career_hr",
+            "career_war",
+            "career_ops",
+            "career_hr_rate",
+            "career_war_per_pa",
+        ]
+        df = df.merge(history_base.loc[:, history_cols], on=["season", "team", "player_name"], how="left")
+
+        prior_defaults = [
+            "prev_season_pa",
+            "prev_season_ops",
+            "prev_season_hr",
+            "prev_season_war",
+            "career_pa",
+            "career_hr",
+            "career_war",
+            "career_ops",
+            "career_hr_rate",
+            "career_war_per_pa",
+        ]
+        for col in prior_defaults:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
         feature_cols = [
             "game_no",
             "PA_cum",
@@ -315,6 +380,14 @@ class HitterFeatureBuilder:
             "age_squared",
             "age_missing",
             "days_since_season_start",
+            "prev_season_pa",
+            "prev_season_ops",
+            "prev_season_hr",
+            "prev_season_war",
+            "career_pa",
+            "career_ops",
+            "career_hr_rate",
+            "career_war_per_pa",
         ]
 
         for col in self.config.hitter.categorical_cols:
@@ -374,7 +447,7 @@ class HitterFeatureBuilder:
 
         # ── Final-season stats for labels ─────────────────────────────────────
         final_df = (
-            df.groupby("player_key", as_index=False)
+            df.groupby(["season", "player_key"], as_index=False)
             .agg(
                 team=("team", "last"),
                 player_name=("player_name", "last"),
@@ -386,7 +459,7 @@ class HitterFeatureBuilder:
         )
 
         samples = df.loc[sample_mask].copy()
-        samples = samples.merge(final_df, on=["player_key", "team", "player_name"], how="left")
+        samples = samples.merge(final_df, on=["season", "player_key", "team", "player_name"], how="left")
         samples["sample_date"] = samples["game_date"].dt.strftime("%Y-%m-%d")
         samples["OPS_ros"] = samples["OPS_final"] - samples["OPS_to_date"]
         samples["HR_ros"] = samples["HR_final"] - samples["HR_cum"]

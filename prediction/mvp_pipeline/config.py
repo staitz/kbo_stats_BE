@@ -36,8 +36,16 @@ class HitterFeatureConfig:
     rolling_windows: tuple[int, ...] = (5, 10, 20)
     regression_pa_k: int = 100
     hr_blend_pa_k: int = 140
+    hr_projection_pa_k: int = 180
     ops_blend_pa_k: int = 100
+    ops_projection_pa_k: int = 220
     war_blend_pa_k: int = 120
+    war_projection_pa_k: int = 260
+    ops_final_min: float = 0.45
+    ops_final_max: float = 1.05
+    hr_final_max: float = 55.0
+    war_final_min: float = -1.0
+    war_final_max: float = 12.0
     categorical_cols: tuple[str, ...] = ("team",)
     numeric_cols: tuple[str, ...] = (
         "PA",

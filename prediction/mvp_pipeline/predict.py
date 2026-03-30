@@ -6,12 +6,13 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from db_support import executemany, fetchall, is_postgres, table_columns
 from .config import AppConfig, get_config
-from .db import load_hitter_game_logs, open_db
-from .features import HitterFeatureBuilder
+from .db import load_hitter_game_logs, open_db, resolve_training_seasons
+from .features import HitterFeatureBuilder, regressed_rate
 from .schema import MODEL_VERSION, ModelSchema, SchemaValidationError, validate_input
 
 # ---------------------------------------------------------------------------
@@ -28,6 +29,11 @@ def blend_projection_and_prediction(projection: pd.Series, prediction: pd.Series
     return blended, weight
 
 
+def blend_anchor_with_current(anchor: pd.Series, current: pd.Series, exposure: pd.Series, k: int) -> pd.Series:
+    weight = exposure / (exposure + float(k))
+    return ((1.0 - weight) * anchor) + (weight * current)
+
+
 def load_models(model_dir: str | Path) -> dict[str, object]:
     model_path = Path(model_dir)
     return {
@@ -37,11 +43,45 @@ def load_models(model_dir: str | Path) -> dict[str, object]:
     }
 
 
-def make_preseason_projection(snapshot_df: pd.DataFrame) -> pd.DataFrame:
+def make_preseason_projection(snapshot_df: pd.DataFrame, config: AppConfig) -> pd.DataFrame:
     projection = snapshot_df[["player_key", "player_name", "team", "age"]].copy()
-    projection["proj_ops"] = 0.65 * snapshot_df["regressed_ops"] + 0.35 * snapshot_df["OPS_to_date"]
-    projection["proj_hr"] = (snapshot_df["HR_cum"] / snapshot_df["PA_cum"].clip(lower=1)) * 550.0
-    projection["proj_war"] = (snapshot_df["WAR_to_date"] / snapshot_df["PA_cum"].clip(lower=1)) * 550.0
+    pa = snapshot_df["PA_cum"].fillna(0.0)
+    prev_ops = snapshot_df["prev_season_ops"].where(snapshot_df["prev_season_pa"] > 0, snapshot_df["career_ops"]).fillna(0.0)
+    ops_anchor = (0.65 * prev_ops) + (0.35 * snapshot_df["regressed_ops"].fillna(0.0))
+    projection["proj_ops"] = blend_anchor_with_current(
+        ops_anchor,
+        snapshot_df["OPS_to_date"].fillna(0.0),
+        pa,
+        config.hitter.ops_projection_pa_k,
+    ).clip(lower=config.hitter.ops_final_min, upper=config.hitter.ops_final_max)
+    current_hr_rate = snapshot_df["HR_cum"] / snapshot_df["PA_cum"].clip(lower=1)
+    prev_hr_rate = snapshot_df["prev_season_hr"] / snapshot_df["prev_season_pa"].clip(lower=1)
+    prior_hr_rate = prev_hr_rate.where(snapshot_df["prev_season_pa"] > 0, snapshot_df["career_hr_rate"]).fillna(0.0)
+    stabilized_hr_rate = blend_anchor_with_current(
+        prior_hr_rate,
+        current_hr_rate.fillna(0.0),
+        pa,
+        config.hitter.hr_projection_pa_k,
+    )
+    current_hr_pace = current_hr_rate.fillna(0.0) * 550.0
+    early_hr_floor = current_hr_pace * (pa / (pa + 120.0))
+    projection["proj_hr"] = np.maximum(
+        np.maximum(snapshot_df["HR_cum"].fillna(0.0), early_hr_floor),
+        stabilized_hr_rate * 550.0,
+    ).clip(lower=0.0, upper=config.hitter.hr_final_max)
+    prev_war_rate = snapshot_df["prev_season_war"] / snapshot_df["prev_season_pa"].clip(lower=1)
+    prior_war_rate = prev_war_rate.where(snapshot_df["prev_season_pa"] > 0, snapshot_df["career_war_per_pa"]).fillna(0.0)
+    current_war_rate = snapshot_df["WAR_to_date"] / snapshot_df["PA_cum"].clip(lower=1)
+    stabilized_war_rate = blend_anchor_with_current(
+        prior_war_rate,
+        current_war_rate.fillna(0.0),
+        pa,
+        config.hitter.war_projection_pa_k,
+    )
+    projection["proj_war"] = (stabilized_war_rate * 550.0).clip(
+        lower=config.hitter.war_final_min,
+        upper=config.hitter.war_final_max,
+    )
     return projection
 
 
@@ -50,6 +90,7 @@ def predict_hitter_targets(
     config: AppConfig | None = None,
     model_dir: str | Path | None = None,
     as_of_date: str | None = None,
+    target_season: int | None = None,
     mode: str = MODE_PREDICTION,
     allow_missing_features: bool = False,
 ) -> pd.DataFrame:
@@ -61,6 +102,8 @@ def predict_hitter_targets(
         config:                 AppConfig (loaded automatically if None).
         model_dir:              Path to the directory that holds the trained .pkl models.
         as_of_date:             Cutoff date string YYYY-MM-DD.  If None, uses latest game date.
+        target_season:          Season being predicted. If None, inferred from ``as_of_date`` or
+                                the latest season present in ``game_logs``.
         mode:                   ``"projection"`` (pre-season, prev-year data, projection-only)
                                 or ``"prediction"`` (in-season, PA-based blend).  Default: prediction.
         allow_missing_features: If *True*, missing schema features are filled with 0 and
@@ -75,6 +118,14 @@ def predict_hitter_targets(
     builder = HitterFeatureBuilder(cfg)
     artifacts = builder.build_daily_features(game_logs)
     feature_df = artifacts.feature_df.copy()
+    effective_target_season = (
+        int(target_season)
+        if target_season is not None
+        else (pd.Timestamp(as_of_date).year if as_of_date is not None else int(feature_df["season"].max()))
+    )
+    if mode == MODE_PROJECTION and effective_target_season not in set(feature_df["season"].astype(int).tolist()):
+        effective_target_season = int(feature_df["season"].max())
+    feature_df = feature_df.loc[feature_df["season"] == effective_target_season].copy()
 
     if as_of_date is not None:
         cutoff = pd.Timestamp(as_of_date)
@@ -85,7 +136,7 @@ def predict_hitter_targets(
     latest = feature_df.sort_values(["player_key", "game_date"]).groupby("player_key", as_index=False).tail(1).copy()
     effective_model_dir = Path(model_dir) if model_dir else cfg.model_dir
     models = load_models(effective_model_dir)
-    projection_df = make_preseason_projection(latest)
+    projection_df = make_preseason_projection(latest, cfg)
 
     # ── Schema contract enforcement ──────────────────────────────────────
     schema_path = effective_model_dir / "schema.json"
@@ -127,11 +178,23 @@ def predict_hitter_targets(
     latest["blended_ops_final"], latest["ops_weight"] = blend_projection_and_prediction(
         latest["proj_ops"], latest["pred_ops_final"], latest["PA_cum"], cfg.hitter.ops_blend_pa_k
     )
+    latest["blended_ops_final"] = latest["blended_ops_final"].clip(
+        lower=cfg.hitter.ops_final_min,
+        upper=cfg.hitter.ops_final_max,
+    )
     latest["blended_hr_final"], latest["hr_weight"] = blend_projection_and_prediction(
         latest["proj_hr"], latest["pred_hr_final"], latest["PA_cum"], cfg.hitter.hr_blend_pa_k
     )
+    latest["blended_hr_final"] = np.maximum(latest["blended_hr_final"], latest["proj_hr"]).clip(
+        lower=0.0,
+        upper=cfg.hitter.hr_final_max,
+    )
     latest["blended_war_final"], latest["war_weight"] = blend_projection_and_prediction(
         latest["proj_war"], latest["pred_war_final"], latest["PA_cum"], cfg.hitter.war_blend_pa_k
+    )
+    latest["blended_war_final"] = latest["blended_war_final"].clip(
+        lower=cfg.hitter.war_final_min,
+        upper=cfg.hitter.war_final_max,
     )
 
     # In PROJECTION mode, ignore current-season PA and use the projection value only.
@@ -374,12 +437,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = get_config()
-    game_logs = load_hitter_game_logs(args.input, args.season)
+    if args.mode == MODE_PROJECTION:
+        data_seasons = resolve_training_seasons(args.input or (Path(__file__).resolve().parents[2] / "kbo_stats.db"), args.season - 1)
+    else:
+        historical_seasons = resolve_training_seasons(args.input or (Path(__file__).resolve().parents[2] / "kbo_stats.db"), args.season - 1)
+        data_seasons = sorted(set(historical_seasons + [args.season]))
+    game_logs = load_hitter_game_logs(args.input, data_seasons)
     pred_df = predict_hitter_targets(
         game_logs=game_logs,
         config=cfg,
         model_dir=args.model_dir,
         as_of_date=args.as_of_date,
+        target_season=args.season,
         mode=args.mode,
         allow_missing_features=args.allow_missing_features,
     )
@@ -387,11 +456,12 @@ def main() -> None:
         save_predictions(pred_df, args.output)
     if args.upsert_db:
         db_path = args.db_path or (Path(__file__).resolve().parents[2] / "kbo_stats.db")
+        model_season = max(resolve_training_seasons(db_path, args.season))
         count = upsert_predictions_to_db(
             pred_df=pred_df,
             db_path=db_path,
             season=args.season,
-            model_season=args.season,
+            model_season=model_season,
             replace_existing=args.replace_existing,
             prediction_mode=args.mode,
         )
