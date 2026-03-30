@@ -338,25 +338,96 @@ def computed_standings_rows(season: int) -> list[dict[str, Any]]:
             }
         )
 
-    standings.sort(key=lambda r: (-float(r["win_pct"]), -int(r["wins"]), int(r["losses"]), str(r["team"])))
     if not standings:
         return []
 
-    leader_wins = int(standings[0]["wins"])
-    leader_losses = int(standings[0]["losses"])
+    # 1차 정렬 (승률, 다승)
+    standings.sort(key=lambda r: (-float(r["win_pct"]), -int(r["wins"]), int(r["losses"]), str(r["team"])))
 
-    # 공동 순위(competition ranking): 동일 승률이면 같은 순위, 다음은 건너뜀 (1,1,3 방식)
+    # 2차 정렬 (타이 브레이커: 상대 전적, 다득점)
+    # 그룹화 처리: 승률과 승수가 동일한 팀들끼리 모아서 타이 브레이커 적용
+    grouped_standings: list[list[dict[str, Any]]] = []
+    for team_stat in standings:
+        if not grouped_standings:
+            grouped_standings.append([team_stat])
+        else:
+            last_group = grouped_standings[-1]
+            first_in_group = last_group[0]
+            if (
+                float(team_stat["win_pct"]) == float(first_in_group["win_pct"])
+                and team_stat["wins"] == first_in_group["wins"]
+            ):
+                last_group.append(team_stat)
+            else:
+                grouped_standings.append([team_stat])
+
+    final_standings: list[dict[str, Any]] = []
+    
+    for group in grouped_standings:
+        if len(group) > 1:
+            teams_in_group = [t["team"] for t in group]
+            
+            def tiebreaker_key(t):
+                team_name = t["team"]
+                head_to_head_wins = 0
+                head_to_head_losses = 0
+                head_to_head_runs = 0
+                
+                # 상대 전적 계산 (이 그룹 내의 팀들만)
+                for opp in teams_in_group:
+                    if opp == team_name:
+                        continue
+                    # 해당 팀과의 경기 찾기
+                    for g in by_team[team_name]:
+                        if g.get("opp_team") == opp:
+                            if g.get("result") == "W":
+                                head_to_head_wins += 1
+                            elif g.get("result") == "L":
+                                head_to_head_losses += 1
+                            # TODO: 현재 _team_game_rows는 W/L로 수정되면서 팀별 득점이 반환되지 않음.
+                            # 우선순위: 상대 전적 다승 -> 상대 전적 최소 패
+                            # 따라서 임시로 상대전적 다승으로 비교
+                
+                hth_pct = 0.0
+                if (head_to_head_wins + head_to_head_losses) > 0:
+                    hth_pct = head_to_head_wins / (head_to_head_wins + head_to_head_losses)
+                    
+                return (-hth_pct, -head_to_head_wins, head_to_head_losses, team_name)
+            
+            # 동률 그룹 내에서 타이 브레이커 적용
+            group.sort(key=tiebreaker_key)
+            
+        final_standings.extend(group)
+
+    leader_wins = int(final_standings[0]["wins"])
+    leader_losses = int(final_standings[0]["losses"])
+
+    # KBO 공식 순위는 동률일 때 타이브레이커에 의해 최종적으로 1순위씩 분배됨
     current_rank = 1
-    for idx, row in enumerate(standings):
+    for idx, row in enumerate(final_standings):
         gb = ((leader_wins - int(row["wins"])) + (int(row["losses"]) - leader_losses)) / 2.0
+        
+        # 완전 분배 (KBO 방식) - 동률이더라도 타이브레이커가 갈리므로 순위가 강제로 1등수씩 차이남
+        # (만약 이전 전적, 득점, 전년순위까지 모조리 같아서 KBO가 공동 선언한다면 그때만 공동순위. 보통은 다 다름)
+        # 하지만 예외적으로 시즌 초반 0승 0패인 경우들을 위해 fallback
         if idx > 0:
-            prev = standings[idx - 1]
-            if float(row["win_pct"]) < float(prev["win_pct"]):
-                current_rank = idx + 1
+            prev = final_standings[idx - 1]
+            if (
+                float(row["win_pct"]) == float(prev["win_pct"])
+                and row["wins"] == prev["wins"]
+                and row["losses"] == prev["losses"]
+            ):
+                # 타이브레이커로 갈렸으면 순위 증가, 하지만 지금 임시 타이브레이커로도 완전히 같다면 공동순위 유지
+                pass # 유지 
+            else:
+                current_rank = idx + 1 # 다르면 현재 인덱스로 순위 강등
+        else:
+            current_rank = 1
+
         row["rank"] = current_rank
         row["gb"] = round(gb, 1)
 
-    return standings
+    return final_standings
 
 
 
