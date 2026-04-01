@@ -204,6 +204,23 @@ def logs_latest_game_date(season: int) -> str | None:
     return (row or {}).get("as_of_date")
 
 
+def _table_latest_game_date(table_name: str, season: int) -> str | None:
+    if not table_exists(table_name):
+        return None
+    row = query_one(
+        f"SELECT MAX(game_date) AS as_of_date FROM {table_name} WHERE substr(game_date, 1, 4) = %s",
+        (str(season),),
+    )
+    return (row or {}).get("as_of_date")
+
+
+def computed_standings_as_of(season: int) -> str | None:
+    pitcher_latest = _table_latest_game_date("pitcher_game_logs", season)
+    hitter_latest = _table_latest_game_date("hitter_game_logs", season)
+    dates = [value for value in (pitcher_latest, hitter_latest) if value]
+    return max(dates) if dates else None
+
+
 def available_seasons() -> list[int]:
     """hitter_season_totals에 실제 데이터가 있는 시즌 목록 (내림차순)."""
     if not table_exists("hitter_season_totals"):
@@ -219,7 +236,9 @@ def _team_game_rows(season: int) -> list[dict[str, Any]]:
     # 1순위: pitcher_game_logs의 실제 W/L 컬럼으로 승패 판정 (KBO 공식 기준)
     #   - 해당 게임에서 팀 투수들의 W 합계 > 0 이면 승, L 합계 > 0 이면 패, 둘 다 0이면 무
     # 2순위(폴백): pitcher_game_logs 없을 경우 hitter_game_logs R 합계로 추론
-    if table_exists("pitcher_game_logs"):
+    pitcher_latest = _table_latest_game_date("pitcher_game_logs", season)
+    hitter_latest = _table_latest_game_date("hitter_game_logs", season)
+    if pitcher_latest and (not hitter_latest or pitcher_latest >= hitter_latest):
         return query_all(
             """
             WITH pitcher_results AS (
@@ -251,6 +270,8 @@ def _team_game_rows(season: int) -> list[dict[str, Any]]:
         )
 
     # 폴백: hitter_game_logs R 합계로 추론
+    if not hitter_latest:
+        return []
     return query_all(
         """
         WITH team_scores AS (
