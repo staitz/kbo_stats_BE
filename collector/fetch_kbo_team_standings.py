@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import argparse
 import datetime as dt
 import re
+from io import StringIO
 from typing import Any
 
 import pandas as pd
@@ -14,6 +17,35 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
 )
+
+KR_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "rank": ("순위",),
+    "team": ("팀명", "팀", "구단"),
+    "games": ("경기",),
+    "wins": ("승",),
+    "losses": ("패",),
+    "draws": ("무",),
+    "win_pct": ("승률",),
+    "gb": ("게임차",),
+    "recent_10": ("최근10경기", "최근10", "최근 10경기"),
+    "streak": ("연속",),
+    "home_record": ("홈",),
+    "away_record": ("방문", "원정"),
+}
+
+EN_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "rank": ("rk", "rank"),
+    "team": ("team",),
+    "games": ("games", "g"),
+    "wins": ("w",),
+    "losses": ("l",),
+    "draws": ("d",),
+    "win_pct": ("pct",),
+    "gb": ("gb",),
+    "streak": ("streak",),
+    "home_record": ("home",),
+    "away_record": ("away",),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,135 +87,157 @@ def _init_table(conn) -> None:
 def _fetch_html(url: str) -> str:
     resp = requests.get(url, timeout=20, headers={"User-Agent": USER_AGENT})
     resp.raise_for_status()
-    resp.encoding = resp.apparent_encoding or resp.encoding
     return resp.text
 
 
-def _normalize_columns(df: pd.DataFrame) -> dict[str, str]:
-    mapping = {}
-    for c in df.columns:
-        key = str(c).strip().lower().replace(" ", "")
-        mapping[key] = c
-    return mapping
+def _parse_tables(html: str, source_label: str) -> list[pd.DataFrame]:
+    try:
+        return pd.read_html(StringIO(html))
+    except ValueError as exc:
+        raise RuntimeError(f"Failed to parse {source_label} standings tables: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - defensive against parser-specific failures
+        raise RuntimeError(f"Unexpected {source_label} standings parse failure: {exc.__class__.__name__}") from exc
 
 
-def _pick_kr_table(tables: list[pd.DataFrame]) -> pd.DataFrame | None:
+def _normalize_name(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return re.sub(r"[^0-9a-z가-힣]+", "", text)
+
+
+def _resolve_columns(df: pd.DataFrame, aliases: dict[str, tuple[str, ...]]) -> dict[str, str] | None:
+    normalized_columns = {_normalize_name(column): str(column) for column in df.columns}
+    resolved: dict[str, str] = {}
+    for canonical, choices in aliases.items():
+        matched = next((normalized_columns.get(_normalize_name(choice)) for choice in choices), None)
+        if matched is not None:
+            resolved[canonical] = matched
+    return resolved
+
+
+def _pick_table(
+    tables: list[pd.DataFrame],
+    aliases: dict[str, tuple[str, ...]],
+    required: tuple[str, ...],
+) -> tuple[pd.DataFrame, dict[str, str]] | None:
     for df in tables:
-        cols = _normalize_columns(df)
-        if "순위" in cols and "팀명" in cols and "승" in cols and "패" in cols and "무" in cols:
-            return df
-    return None
-
-
-def _pick_en_table(tables: list[pd.DataFrame]) -> pd.DataFrame | None:
-    for df in tables:
-        cols = _normalize_columns(df)
-        if "rk" in cols and "team" in cols and "w" in cols and "l" in cols and "d" in cols:
-            return df
+        columns = _resolve_columns(df, aliases)
+        if columns and all(key in columns for key in required):
+            return df, columns
     return None
 
 
 def _extract_as_of_date(html: str) -> str:
-    # KR page format: 2025.10.04
-    m = re.search(r"(20\d{2})\.(\d{2})\.(\d{2})", html)
-    if m:
-        return f"{m.group(1)}{m.group(2)}{m.group(3)}"
-    # fallback today
+    match = re.search(r"(20\d{2})\.(\d{2})\.(\d{2})", html)
+    if match:
+        return f"{match.group(1)}{match.group(2)}{match.group(3)}"
     return dt.datetime.now().strftime("%Y%m%d")
 
 
-def _to_int(v: Any) -> int:
-    if v is None:
+def _to_int(value: Any) -> int:
+    if value is None:
         return 0
-    s = str(v).strip().replace(",", "")
-    if s in {"", "-", "nan", "None"}:
+    text = str(value).strip().replace(",", "")
+    if text in {"", "-", "nan", "None"}:
         return 0
     try:
-        return int(float(s))
+        return int(float(text))
     except Exception:
         return 0
 
 
-def _to_float(v: Any) -> float:
-    if v is None:
+def _to_float(value: Any) -> float:
+    if value is None:
         return 0.0
-    s = str(v).strip().replace(",", "")
-    if s in {"", "-", "nan", "None"}:
+    text = str(value).strip().replace(",", "")
+    if text in {"", "-", "nan", "None"}:
         return 0.0
     try:
-        return float(s)
+        return float(text)
     except Exception:
         return 0.0
 
 
-def _rows_from_kr(df: pd.DataFrame) -> list[dict[str, Any]]:
+def _optional_text(row: pd.Series, columns: dict[str, str], key: str) -> str:
+    column = columns.get(key)
+    if not column:
+        return ""
+    return str(row.get(column, "")).strip()
+
+
+def _rows_from_table(
+    df: pd.DataFrame,
+    columns: dict[str, str],
+    source_label: str,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for _, r in df.iterrows():
-        team = str(r.get("팀명", "")).strip()
+    for _, row in df.iterrows():
+        team = str(row.get(columns["team"], "")).strip()
         if not team:
             continue
         rows.append(
             {
-                "rank": _to_int(r.get("순위")),
+                "rank": _to_int(row.get(columns["rank"])),
                 "team": team,
-                "games": _to_int(r.get("경기")),
-                "wins": _to_int(r.get("승")),
-                "losses": _to_int(r.get("패")),
-                "draws": _to_int(r.get("무")),
-                "win_pct": _to_float(r.get("승률")),
-                "gb": _to_float(r.get("게임차")),
-                "recent_10": str(r.get("최근10경기", "")).strip(),
-                "streak": str(r.get("연속", "")).strip(),
-                "home_record": str(r.get("홈", "")).strip(),
-                "away_record": str(r.get("방문", "")).strip(),
+                "games": _to_int(row.get(columns.get("games", ""), 0)),
+                "wins": _to_int(row.get(columns.get("wins", ""), 0)),
+                "losses": _to_int(row.get(columns.get("losses", ""), 0)),
+                "draws": _to_int(row.get(columns.get("draws", ""), 0)),
+                "win_pct": _to_float(row.get(columns.get("win_pct", ""), 0)),
+                "gb": _to_float(row.get(columns.get("gb", ""), 0)),
+                "recent_10": _optional_text(row, columns, "recent_10") if source_label.endswith("KR") else "",
+                "streak": _optional_text(row, columns, "streak"),
+                "home_record": _optional_text(row, columns, "home_record"),
+                "away_record": _optional_text(row, columns, "away_record"),
             }
         )
     return rows
 
 
-def _rows_from_en(df: pd.DataFrame) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for _, r in df.iterrows():
-        team = str(r.get("TEAM", "")).strip()
-        if not team:
-            continue
-        rows.append(
-            {
-                "rank": _to_int(r.get("RK")),
-                "team": team,
-                "games": _to_int(r.get("GAMES")),
-                "wins": _to_int(r.get("W")),
-                "losses": _to_int(r.get("L")),
-                "draws": _to_int(r.get("D")),
-                "win_pct": _to_float(r.get("PCT")),
-                "gb": _to_float(r.get("GB")),
-                "recent_10": "",
-                "streak": str(r.get("STREAK", "")).strip(),
-                "home_record": str(r.get("HOME", "")).strip(),
-                "away_record": str(r.get("AWAY", "")).strip(),
-            }
-        )
-    return rows
+def _fetch_rows_kr() -> tuple[str, str, list[dict[str, Any]]]:
+    html = _fetch_html(KBO_KR_STANDINGS_URL)
+    tables = _parse_tables(html, "KR")
+    picked = _pick_table(
+        tables,
+        KR_COLUMN_ALIASES,
+        ("rank", "team", "wins", "losses", "draws"),
+    )
+    if picked is None:
+        raise RuntimeError("Failed to locate KR standings table")
+    df, columns = picked
+    return ("KBO_OFFICIAL_KR", _extract_as_of_date(html), _rows_from_table(df, columns, "KBO_OFFICIAL_KR"))
+
+
+def _fetch_rows_en() -> tuple[str, str, list[dict[str, Any]]]:
+    html = _fetch_html(KBO_EN_STANDINGS_URL)
+    tables = _parse_tables(html, "EN")
+    picked = _pick_table(
+        tables,
+        EN_COLUMN_ALIASES,
+        ("rank", "team", "wins", "losses", "draws"),
+    )
+    if picked is None:
+        raise RuntimeError("Failed to locate EN standings table")
+    df, columns = picked
+    as_of_date = dt.datetime.now().strftime("%Y%m%d")
+    return ("KBO_OFFICIAL_EN", as_of_date, _rows_from_table(df, columns, "KBO_OFFICIAL_EN"))
 
 
 def _fetch_rows(source: str) -> tuple[str, str, list[dict[str, Any]]]:
-    if source in {"kr", "auto"}:
-        html = _fetch_html(KBO_KR_STANDINGS_URL)
-        tables = pd.read_html(html)
-        table = _pick_kr_table(tables)
-        if table is not None:
-            return ("KBO_OFFICIAL_KR", _extract_as_of_date(html), _rows_from_kr(table))
-        if source == "kr":
-            raise RuntimeError("Failed to parse KR standings table")
+    errors: list[str] = []
 
-    html = _fetch_html(KBO_EN_STANDINGS_URL)
-    tables = pd.read_html(html)
-    table = _pick_en_table(tables)
-    if table is None:
-        raise RuntimeError("Failed to parse EN standings table")
-    # EN page doesn't expose explicit date in plain text; use today as_of and season inferred by top nav first year
-    as_of_date = dt.datetime.now().strftime("%Y%m%d")
-    return ("KBO_OFFICIAL_EN", as_of_date, _rows_from_en(table))
+    if source in {"kr", "auto"}:
+        try:
+            return _fetch_rows_kr()
+        except Exception as exc:
+            if source == "kr":
+                raise
+            errors.append(f"KR={exc}")
+
+    try:
+        return _fetch_rows_en()
+    except Exception as exc:
+        errors.append(f"EN={exc}")
+        raise RuntimeError(" / ".join(errors)) from exc
 
 
 def main() -> None:
@@ -198,54 +252,7 @@ def main() -> None:
     conn = connect_for_path(args.db)
     try:
         _init_table(conn)
-        values = [
-            (
-                season,
-                as_of_date,
-                row["rank"],
-                row["team"],
-                row["games"],
-                row["wins"],
-                row["losses"],
-                row["draws"],
-                row["win_pct"],
-                row["gb"],
-                row["recent_10"],
-                row["streak"],
-                row["home_record"],
-                row["away_record"],
-                source_label,
-                KBO_KR_STANDINGS_URL if source_label.endswith("KR") else KBO_EN_STANDINGS_URL,
-                now,
-            )
-            for row in rows
-        ]
-        execute(
-            conn,
-            """
-            INSERT INTO team_standings
-            (season, as_of_date, rank, team, games, wins, losses, draws, win_pct, gb,
-             recent_10, streak, home_record, away_record, source, source_url, collected_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(season, as_of_date, team) DO UPDATE SET
-              rank=excluded.rank,
-              games=excluded.games,
-              wins=excluded.wins,
-              losses=excluded.losses,
-              draws=excluded.draws,
-              win_pct=excluded.win_pct,
-              gb=excluded.gb,
-              recent_10=excluded.recent_10,
-              streak=excluded.streak,
-              home_record=excluded.home_record,
-              away_record=excluded.away_record,
-              source=excluded.source,
-              source_url=excluded.source_url,
-              collected_at=excluded.collected_at
-            """,
-            values[0],
-        )
-        for value in values[1:]:
+        for row in rows:
             execute(
                 conn,
                 """
@@ -269,7 +276,25 @@ def main() -> None:
                   source_url=excluded.source_url,
                   collected_at=excluded.collected_at
                 """,
-                value,
+                (
+                    season,
+                    as_of_date,
+                    row["rank"],
+                    row["team"],
+                    row["games"],
+                    row["wins"],
+                    row["losses"],
+                    row["draws"],
+                    row["win_pct"],
+                    row["gb"],
+                    row["recent_10"],
+                    row["streak"],
+                    row["home_record"],
+                    row["away_record"],
+                    source_label,
+                    KBO_KR_STANDINGS_URL if source_label.endswith("KR") else KBO_EN_STANDINGS_URL,
+                    now,
+                ),
             )
         conn.commit()
         print(f"[ok] team_standings upserted={len(rows)} season={season} as_of_date={as_of_date} source={source_label}")
