@@ -65,6 +65,18 @@ class ApiEndpointsTest(TestCase):
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS pitcher_game_logs (
+                    game_date TEXT NOT NULL,
+                    game_id TEXT NOT NULL,
+                    team TEXT NOT NULL,
+                    player_name TEXT NOT NULL,
+                    W INTEGER NOT NULL DEFAULT 0,
+                    L INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS hitter_daily_snapshots (
                     season INTEGER NOT NULL,
                     as_of_date TEXT NOT NULL,
@@ -129,6 +141,7 @@ class ApiEndpointsTest(TestCase):
 
             cursor.execute("DELETE FROM hitter_season_totals")
             cursor.execute("DELETE FROM hitter_game_logs")
+            cursor.execute("DELETE FROM pitcher_game_logs")
             cursor.execute("DELETE FROM hitter_daily_snapshots")
             cursor.execute("DELETE FROM hitter_predictions")
             cursor.execute("DELETE FROM team_standings")
@@ -309,6 +322,27 @@ class ApiEndpointsTest(TestCase):
         self.assertEqual(data["requested_season"], 2026)
         self.assertEqual(data["effective_season"], 2025)
         self.assertEqual(data["mode"], "PRESEASON_FALLBACK")
+
+    def test_standings_use_freshest_available_log_source(self):
+        with connection.cursor() as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO pitcher_game_logs (game_date, game_id, team, player_name, W, L)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                [
+                    ("20250322", "20250322HTLG0", "KIA", "Pitcher A", 1, 0),
+                    ("20250322", "20250322HTLG0", "LG", "Pitcher B", 0, 1),
+                ],
+            )
+
+        res = self.client.get("/api/standings/?season=2025")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["as_of_date"], "20250410")
+        self.assertEqual(len(data["rows"]), 2)
+        self.assertEqual(data["rows"][0]["team"], "LG")
+        self.assertEqual(data["rows"][0]["wins"], 1)
 
 
 class ApiErrorHandlingTest(TestCase):
