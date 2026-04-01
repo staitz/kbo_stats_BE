@@ -760,7 +760,7 @@ def standings(request):
     season = requested_season
 
     try:
-        as_of_date = repo.logs_latest_game_date(season)
+        as_of_date = repo.computed_standings_as_of(season)
         if not as_of_date:
             fallback_season = repo.logs_latest_season_at_or_before(requested_season)
             if fallback_season is None:
@@ -774,7 +774,7 @@ def standings(request):
                     }
                 )
             season = fallback_season
-            as_of_date = repo.logs_latest_game_date(season)
+            as_of_date = repo.computed_standings_as_of(season)
             if not as_of_date:
                 return JsonResponse(
                     {
@@ -865,7 +865,7 @@ def home_summary(request):
         top_era = repo.top_era_rows(season, 5, min_outs=max(effective_min_outs, 15))
         top_war = repo.top_combined_war_rows(season, effective_min_pa, effective_min_outs, 5)
 
-        standings_as_of = repo.logs_latest_game_date(season)
+        standings_as_of = repo.computed_standings_as_of(season)
         standings_preview = repo.computed_standings_rows(season)[:10]
 
         return JsonResponse(
