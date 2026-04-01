@@ -349,6 +349,8 @@ def _map_hitter_columns(headers: List[str]) -> Dict[str, Optional[str]]:
             if norm in normalized:
                 mapped[key] = normalized[norm]
                 break
+            if len(norm) <= 1:
+                continue
             for header_norm, header_raw in normalized.items():
                 if norm and (norm in header_norm or header_norm in norm):
                     mapped[key] = header_raw
