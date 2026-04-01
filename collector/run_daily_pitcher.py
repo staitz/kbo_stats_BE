@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
 import requests
-from collector.kbo_api import _make_driver
 from collector.kbo_api import fetch_day_schedule as fetch_kbo_day_schedule
 from collector.kbo_naver_crawler import (
     fetch_day_schedule as fetch_naver_day_schedule,
@@ -49,7 +48,6 @@ def _today_yyyymmdd_kst() -> str:
 
 
 def _fetch_rows_for_game(
-    driver,
     game_date: str,
     game_id: str,
     away_team: str,
@@ -263,7 +261,6 @@ def collect_for_dates(
     init_db(conn)
     migrate_pitcher_columns(conn)
 
-    driver = _make_driver(headless=True)
     try:
         total_games = 0
         total_rows = 0
@@ -298,7 +295,6 @@ def collect_for_dates(
 
                     for game_id, away_team, home_team in game_ids:
                         rows = _fetch_rows_for_game(
-                            driver=driver,
                             game_date=game_date,
                             game_id=game_id,
                             away_team=away_team or "",
@@ -334,11 +330,6 @@ def collect_for_dates(
                         f"[retry] date={game_date} attempt={attempt} wait={wait_s}s "
                         f"error={type(exc).__name__}"
                     )
-                    try:
-                        driver.quit()
-                    except Exception:
-                        pass
-                    driver = _make_driver(headless=True)
                     time.sleep(wait_s)
 
         summary = {
@@ -359,7 +350,6 @@ def collect_for_dates(
         )
         return summary
     finally:
-        driver.quit()
         conn.close()
 
 
