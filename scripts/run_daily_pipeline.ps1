@@ -7,23 +7,31 @@ function Assert-LastExit([string]$step) {
   }
 }
 
-# Crawl: auto-detect season start from KBO schedule (current KST year)
-python -m collector.run_range_hitter --auto-start --upsert
-Assert-LastExit "collector.run_range_hitter"
-python -m collector.run_range_pitcher --auto-start --upsert
-Assert-LastExit "collector.run_range_pitcher"
+$PythonExe = Join-Path (Get-Location) "venv_win\Scripts\python.exe"
+if (-not (Test-Path $PythonExe)) {
+  $PythonExe = "python"
+}
 
-# Snapshot range from existing logs for current season (KST year)
-$season = (python -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('Asia/Seoul')).year)").Trim()
+function Invoke-PythonStep([string]$step, [string[]]$arguments) {
+  & $PythonExe @arguments
+  Assert-LastExit $step
+}
+
+$season = (& $PythonExe -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('Asia/Seoul')).year)").Trim()
+Assert-LastExit "detect season"
+$asOfDate = (& $PythonExe -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y-%m-%d'))").Trim()
+Assert-LastExit "detect as-of date"
 $env:KBO_SEASON = "$season"
 
+# Crawl only the latest window from existing DB state.
+Invoke-PythonStep "collector.run_auto_hitter" @("-m", "collector.run_auto_hitter", "--upsert")
+Invoke-PythonStep "collector.run_auto_pitcher" @("-m", "collector.run_auto_pitcher", "--upsert")
+
 # Sync team schedule from KBO official schedule API for current season
-python -m collector.sync_team_schedule --db kbo_stats.db --season $season
-Assert-LastExit "collector.sync_team_schedule"
+Invoke-PythonStep "collector.sync_team_schedule" @("-m", "collector.sync_team_schedule", "--db", "kbo_stats.db", "--season", "$season")
 
 # Sync team standings snapshot from KBO official standings page
-python -m collector.fetch_kbo_team_standings --db kbo_stats.db --season $season --source auto
-Assert-LastExit "collector.fetch_kbo_team_standings"
+Invoke-PythonStep "collector.fetch_kbo_team_standings" @("-m", "collector.fetch_kbo_team_standings", "--db", "kbo_stats.db", "--season", "$season", "--source", "auto")
 
 $range = @'
 import os
@@ -38,7 +46,7 @@ cur.execute(
 row = cur.fetchone()
 conn.close()
 print(f"{row[0]},{row[1]}")
-'@ | python -
+'@ | & $PythonExe -
 Assert-LastExit "fetch season date range"
 $parts = $range.Split(',')
 $start = $parts[0]
@@ -50,9 +58,7 @@ if ([string]::IsNullOrWhiteSpace($start) -or [string]::IsNullOrWhiteSpace($end) 
   exit 0
 }
 
-python -m prediction.build_hitter_snapshots --db kbo_stats.db --season $season --start $start --end $end --upsert
-Assert-LastExit "prediction.build_hitter_snapshots"
-python -m prediction.build_hitter_season_totals --db kbo_stats.db --season $season --upsert
-Assert-LastExit "prediction.build_hitter_season_totals"
-python -m prediction.build_pitcher_season_totals --db kbo_stats.db --season $season --upsert
-Assert-LastExit "prediction.build_pitcher_season_totals"
+Invoke-PythonStep "prediction.build_hitter_snapshots" @("-m", "prediction.build_hitter_snapshots", "--db", "kbo_stats.db", "--season", "$season", "--start", "$start", "--end", "$end", "--upsert")
+Invoke-PythonStep "prediction.build_hitter_season_totals" @("-m", "prediction.build_hitter_season_totals", "--db", "kbo_stats.db", "--season", "$season", "--upsert")
+Invoke-PythonStep "prediction.build_pitcher_season_totals" @("-m", "prediction.build_pitcher_season_totals", "--db", "kbo_stats.db", "--season", "$season", "--upsert")
+Invoke-PythonStep "prediction.orchestrate_daily" @("-m", "prediction.orchestrate_daily", "--season", "$season", "--as-of-date", "$asOfDate", "--mode", "prediction", "--replace-existing", "--skip-collect", "--skip-snapshot")
