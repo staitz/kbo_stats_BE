@@ -603,6 +603,28 @@ def _season_progress_min_outs(season: int, team: str = "") -> int:
     return int(max_games * 3)
 
 
+def _descending_tens_candidates(base_value: int, floor: int = 0) -> list[int]:
+    base_value = max(base_value, floor)
+    candidates: list[int] = [base_value]
+
+    rounded = (base_value // 10) * 10
+    if rounded >= base_value:
+        rounded -= 10
+
+    while rounded >= floor:
+        candidates.append(rounded)
+        rounded -= 10
+
+    if candidates[-1] != floor:
+        candidates.append(floor)
+
+    dedup: list[int] = []
+    for candidate in candidates:
+        if candidate not in dedup:
+            dedup.append(candidate)
+    return dedup
+
+
 def _pick_effective_min_pa_for_leaderboard(
     season: int,
     team: str,
@@ -615,11 +637,7 @@ def _pick_effective_min_pa_for_leaderboard(
     if not repo.table_exists("hitter_season_totals"):
         return base_min_pa
 
-    candidates = [base_min_pa, 70, 50, 30]
-    dedup: list[int] = []
-    for candidate in candidates:
-        if candidate not in dedup:
-            dedup.append(candidate)
+    dedup = _descending_tens_candidates(base_min_pa, floor=0)
 
     for candidate in dedup:
         if repo.leaderboard_candidate_count(season=season, min_pa=candidate, team=team) >= min_count:
@@ -640,11 +658,7 @@ def _pick_effective_min_outs_for_leaderboard(
     if not repo.table_exists("pitcher_season_totals"):
         return base_min_outs
 
-    candidates = [base_min_outs, 90, 60, 30, 15, 3]
-    dedup: list[int] = []
-    for candidate in candidates:
-        if candidate not in dedup:
-            dedup.append(candidate)
+    dedup = _descending_tens_candidates(base_min_outs, floor=0)
 
     for candidate in dedup:
         if repo.pitcher_leaderboard_candidate_count(season=season, min_outs=candidate, team=team) >= min_count:
