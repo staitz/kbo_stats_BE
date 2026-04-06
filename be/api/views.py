@@ -865,7 +865,7 @@ def home_summary(request):
             season=season,
             team="",
             base_min_pa=min_pa,
-            auto_relax=False,
+            auto_relax=True,
             min_count=5,
         )
 
@@ -965,7 +965,7 @@ def leaderboard(request):
                 season=season,
                 team=team,
                 base_min_outs=requested_min_outs,
-                auto_relax=False,
+                auto_relax=True,
                 min_count=20,
             )
         else:
@@ -1056,7 +1056,7 @@ def leaderboard(request):
             season=season,
             team=team,
             base_min_pa=requested_min_pa,
-            auto_relax=False,  # 규정타석 ON 상태 — 팀 필터 여부와 무관하게 완화하지 않음
+            auto_relax=True,
             min_count=20,
         )
     else:
@@ -1516,7 +1516,7 @@ def team_detail(request, team: str):
             season=season,
             team=name,
             base_min_pa=requested_min_pa,
-            auto_relax=False,
+            auto_relax=True,
             min_count=5,
         )
         min_pa_policy = "AUTO_BY_SEASON_PROGRESS"
