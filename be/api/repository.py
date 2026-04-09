@@ -872,6 +872,7 @@ def predictions_latest_rows(
         return query_all(
             f"""
             SELECT team, player_name, predicted_hr_final, predicted_ops_final, predicted_war_final,
+                   predicted_avg_final,
                    confidence_level, confidence_score, pa_to_date, blend_weight, model_source,
                    prediction_mode, model_version, model_season
             FROM hitter_predictions
@@ -1293,7 +1294,8 @@ def player_latest_prediction(season: int, player_name: str, team: str | None = N
     try:
         return query_one(
             f"""
-            SELECT season, as_of_date, team, player_name, predicted_hr_final, predicted_ops_final, predicted_war_final,
+            SELECT season, as_of_date, team, player_name, predicted_hr_final, predicted_ops_final,
+                   predicted_war_final, predicted_avg_final,
                    confidence_level, confidence_score, model_source, pa_to_date, prediction_mode
             FROM hitter_predictions
             WHERE {where_sql}
@@ -1914,7 +1916,7 @@ def team_latest_predictions(season: int, team: str, latest_date: str, limit: int
     return query_all(
         """
         SELECT player_name, predicted_hr_final, predicted_ops_final, predicted_war_final,
-               confidence_level, blend_weight, model_source
+               predicted_avg_final, confidence_level, blend_weight, model_source
         FROM hitter_predictions
         WHERE season = %s AND team = %s AND as_of_date = %s
         ORDER BY predicted_ops_final DESC

@@ -132,6 +132,11 @@ def _estimate_hitter_projection(
         return latest_prediction
 
     enriched = dict(latest_prediction or {})
+    # Ensure predicted_avg_final is always present and non-zero.
+    # DB rows created before AVG training will have 0.0 (DEFAULT 0) — fall back to current AVG.
+    if not enriched.get("predicted_avg_final"):
+        avg_now = float((current_agg or {}).get("AVG") or 0)
+        enriched["predicted_avg_final"] = round(_clamp(avg_now, 0.100, 0.450), 3) if avg_now > 0 else 0.0
     team = str(enriched.get("team") or "").strip()
     team_games = repo.max_team_games(season, team) if team else 0
     season_games = 144
@@ -255,11 +260,13 @@ def _estimate_hitter_pace_projection(
     rbi_to_date = float(current_agg.get("RBI") or 0)
     ops_to_date = float(current_agg.get("OPS") or 0)
     war_to_date = float((current_row or {}).get("WAR") or 0)
+    avg_to_date = float(current_agg.get("AVG") or 0)
     prior_hr = float((prior_row or {}).get("HR") or 0)
     prior_hits = float((prior_row or {}).get("H") or 0)
     prior_rbi = float((prior_row or {}).get("RBI") or 0)
     prior_ops = float((prior_row or {}).get("OPS") or 0)
     prior_war = float((prior_row or {}).get("WAR") or 0)
+    prior_avg = float((prior_row or {}).get("AVG") or 0)
     latest_prediction_date = repo.latest_prediction_date(season) if repo.table_exists("hitter_predictions") else None
 
     return {
@@ -275,6 +282,7 @@ def _estimate_hitter_pace_projection(
         "predicted_war_final": round(_clamp(_blend_value(prior_war, war_to_date * pace_factor, pa_to_date, 260.0), -1.0, 12.0), 3),
         "predicted_hits_final": max(round(_blend_value(prior_hits, hits_to_date * pace_factor, pa_to_date, 220.0)), int(round(hits_to_date))),
         "predicted_rbi_final": max(round(_blend_value(prior_rbi, rbi_to_date * pace_factor, pa_to_date, 180.0)), int(round(rbi_to_date))),
+        "predicted_avg_final": round(_clamp(_blend_value(prior_avg, avg_to_date, pa_to_date, 160.0), 0.100, 0.450), 3),
     }
 
 
@@ -875,8 +883,15 @@ def home_summary(request):
         top_avg = repo.top_avg_rows(season, effective_min_pa, 5)
         top_ops = repo.top_ops_rows(season, effective_min_pa, 5)
         top_hr = repo.top_hr_rows(season, effective_min_pa, 5)
-        effective_min_outs = _season_progress_min_outs(season)
-        top_era = repo.top_era_rows(season, 5, min_outs=max(effective_min_outs, 15))
+        base_min_outs = _season_progress_min_outs(season)
+        effective_min_outs = _pick_effective_min_outs_for_leaderboard(
+            season=season,
+            team="",
+            base_min_outs=base_min_outs,
+            auto_relax=True,
+            min_count=5,
+        )
+        top_era = repo.top_era_rows(season, 5, min_outs=max(effective_min_outs, 0))
         top_war = repo.top_combined_war_rows(season, effective_min_pa, effective_min_outs, 5)
 
         standings_as_of = repo.computed_standings_as_of(season)
@@ -1440,6 +1455,10 @@ def player_detail(request, player_id: str):
         elif pace_prediction:
             merged_prediction = dict(pace_prediction)
             merged_prediction.update({k: v for k, v in latest_prediction.items() if v is not None})
+            # predicted_avg_final from DB may be 0.0 (DEFAULT 0) when model not yet trained.
+            # In that case, prefer the pace-computed value from pace_prediction.
+            if not latest_prediction.get("predicted_avg_final") and pace_prediction.get("predicted_avg_final"):
+                merged_prediction["predicted_avg_final"] = pace_prediction["predicted_avg_final"]
             latest_prediction = merged_prediction
         latest_prediction = _estimate_hitter_projection(
             latest_prediction=latest_prediction,
