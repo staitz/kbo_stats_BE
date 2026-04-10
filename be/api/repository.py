@@ -1853,9 +1853,24 @@ def team_schedule_rows(team: str, season: int, limit: int = 60) -> list[dict[str
             game_time,
             stadium,
             status
-        FROM team_schedule
-        WHERE season = %s
-          AND (away_team = %s OR home_team = %s)
+        FROM (
+            SELECT
+                game_date,
+                game_id,
+                away_team,
+                home_team,
+                game_time,
+                stadium,
+                status,
+                ROW_NUMBER() OVER (
+                    PARTITION BY game_date, away_team, home_team
+                    ORDER BY game_id DESC
+                ) AS rn
+            FROM team_schedule
+            WHERE season = %s
+              AND (away_team = %s OR home_team = %s)
+        ) sub
+        WHERE rn = 1
         ORDER BY game_date DESC, game_time DESC, game_id DESC
         LIMIT %s
         """,
