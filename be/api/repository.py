@@ -215,10 +215,31 @@ def _table_latest_game_date(table_name: str, season: int) -> str | None:
 
 
 def computed_standings_as_of(season: int) -> str | None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
     pitcher_latest = _table_latest_game_date("pitcher_game_logs", season)
     hitter_latest = _table_latest_game_date("hitter_game_logs", season)
     dates = [value for value in (pitcher_latest, hitter_latest) if value]
-    return max(dates) if dates else None
+    logs_latest = max(dates) if dates else None
+
+    # 우천취소 등으로 game_logs가 없는 날도 있으므로, team_schedule의
+    # '오늘 이전' 최신 날짜를 보조 기준으로 사용한다.
+    schedule_latest: str | None = None
+    if table_exists("team_schedule"):
+        today_kst = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+        rows = query_all(
+            """
+            SELECT MAX(game_date) AS latest
+            FROM team_schedule
+            WHERE season = %s AND game_date <= %s
+            """,
+            (season, today_kst),
+        )
+        if rows and rows[0].get("latest"):
+            schedule_latest = str(rows[0]["latest"]).strip()
+
+    candidates = [d for d in (logs_latest, schedule_latest) if d]
+    return max(candidates) if candidates else None
 
 
 def available_seasons() -> list[int]:
