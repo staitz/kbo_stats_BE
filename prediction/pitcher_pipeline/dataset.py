@@ -13,6 +13,7 @@ from .config import AppConfig, get_config
 
 DEFAULT_DB = "kbo_stats.db"
 PREDICTION_TABLE = "pitcher_predictions"
+SNAPSHOT_TABLE = "pitcher_daily_snapshots"
 
 _PITCHER_LOG_COLUMN_ALIASES = {
     "outs": "OUTS",
@@ -130,6 +131,66 @@ def load_pitcher_logs(db_path: str, season: int) -> pd.DataFrame:
         frame["season"] = frame["season"].astype(int)
         frame["game_date"] = pd.to_datetime(frame["game_date"], format="%Y%m%d")
         numeric_cols = ["OUTS", "H", "ER", "BB", "SO", "HR", "HBP", "W", "L", "SV", "HLD"]
+        return _safe_numeric(frame, numeric_cols)
+    finally:
+        conn.close()
+
+
+
+def load_pitcher_snapshots(db_path: str, season: int) -> pd.DataFrame:
+    """Load pitcher_daily_snapshots for the given season.
+
+    Returns one row per (as_of_date, team, player_name) with pre-computed
+    cumulative and 7-day/14-day rolling stats.  Mirrors ``load_pitcher_logs``
+    but reads the pre-built snapshot table instead of raw game logs.
+    """
+    conn = connect_for_path(db_path)
+    try:
+        query = """
+        SELECT
+            season,
+            as_of_date,
+            team,
+            player_name,
+            COALESCE(role, '') AS role,
+            COALESCE(games, 0) AS games,
+            COALESCE(OUTS, 0) AS OUTS,
+            COALESCE(IP, 0) AS IP,
+            COALESCE(W, 0) AS W,
+            COALESCE(L, 0) AS L,
+            COALESCE(SV, 0) AS SV,
+            COALESCE(HLD, 0) AS HLD,
+            COALESCE(H, 0) AS H,
+            COALESCE(ER, 0) AS ER,
+            COALESCE(BB, 0) AS BB,
+            COALESCE(SO, 0) AS SO,
+            COALESCE(HR, 0) AS HR,
+            COALESCE(HBP, 0) AS HBP,
+            COALESCE(ERA, 0) AS ERA,
+            COALESCE(WHIP, 0) AS WHIP,
+            COALESCE(K9, 0) AS K9,
+            COALESCE(BB9, 0) AS BB9,
+            COALESCE(OUTS_7, 0) AS OUTS_7,
+            COALESCE(ER_7, 0) AS ER_7,
+            COALESCE(BB_7, 0) AS BB_7,
+            COALESCE(SO_7, 0) AS SO_7,
+            COALESCE(HR_7, 0) AS HR_7,
+            COALESCE(HBP_7, 0) AS HBP_7,
+            COALESCE(ERA_7, 0) AS ERA_7
+        FROM pitcher_daily_snapshots
+        WHERE season = ?
+        ORDER BY as_of_date ASC, team ASC, player_name ASC
+        """
+        frame = read_sql_query(query, conn, params=[season])
+        if frame.empty:
+            return frame
+        frame["season"] = frame["season"].astype(int)
+        numeric_cols = [
+            "games", "OUTS", "IP", "W", "L", "SV", "HLD",
+            "H", "ER", "BB", "SO", "HR", "HBP",
+            "ERA", "WHIP", "K9", "BB9",
+            "OUTS_7", "ER_7", "BB_7", "SO_7", "HR_7", "HBP_7", "ERA_7",
+        ]
         return _safe_numeric(frame, numeric_cols)
     finally:
         conn.close()
