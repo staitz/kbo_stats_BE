@@ -1,13 +1,14 @@
 """
-orchestrate_daily.py — Hitter Daily E2E Prediction Pipeline
+orchestrate_daily.py — Daily E2E Prediction Pipeline
 =============================================================
 
-Chains four stages into a single idempotent run:
+Chains stages into a single idempotent run:
 
-  Stage 1 [collect]   Update hitter_game_logs from today's KBO results
-  Stage 2 [snapshot]  Build/update hitter_daily_snapshots
-  Stage 3 [predict]   Run hitter MVP prediction → hitter_predictions DB
-  Stage 4 [verify]    Post-run sanity check (row counts / nulls / distribution)
+  Stage 1 [collect]           Update game_logs from today's KBO results
+  Stage 2 [snapshot]          Build/update hitter_daily_snapshots
+  Stage 2.5 [pitcher_snapshot] Build/update pitcher_daily_snapshots
+  Stage 3 [predict]           Run hitter MVP prediction → hitter_predictions DB
+  Stage 4 [verify]            Post-run sanity check (row counts / nulls / distribution)
 
 Usage examples
 --------------
@@ -120,6 +121,40 @@ def stage_snapshot(
     result = subprocess.run(cmd, cwd=_ROOT, capture_output=False)
     if result.returncode != 0:
         raise RuntimeError(f"prediction.build_hitter_snapshots exited with code {result.returncode}")
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Stage 2.5 — pitcher snapshot
+# ---------------------------------------------------------------------------
+
+def stage_pitcher_snapshot(
+    season: int,
+    as_of_date: str,
+    db_path: Path,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Build pitcher_daily_snapshots up to as_of_date."""
+    as_of_yyyymmdd = as_of_date.replace("-", "")
+
+    if dry_run:
+        _log(
+            f"  [pitcher_snapshot] DRY-RUN: would call prediction.build_pitcher_snapshots "
+            f"--season {season} --as-of {as_of_yyyymmdd} --upsert"
+        )
+        return {"status": "dry_run"}
+
+    cmd = [
+        sys.executable, "-m", "prediction.build_pitcher_snapshots",
+        "--db", str(db_path),
+        "--season", str(season),
+        "--as-of", as_of_yyyymmdd,
+        "--upsert",
+    ]
+    _log(f"  [pitcher_snapshot] {' '.join(cmd)}")
+    result = subprocess.run(cmd, cwd=_ROOT, capture_output=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"prediction.build_pitcher_snapshots exited with code {result.returncode}")
     return {"status": "ok"}
 
 
@@ -349,6 +384,12 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             _log("\n[STAGE 2/4: SNAPSHOT — SKIPPED via --skip-snapshot]")
             stage_results["snapshot"] = {"status": "skipped"}
 
+        if not args.skip_pitcher_snapshot:
+            _run_stage(2, "pitcher_snapshot", stage_pitcher_snapshot, season, as_of, db_path, args.dry_run)
+        else:
+            _log("\n[STAGE 2.5: PITCHER_SNAPSHOT — SKIPPED via --skip-pitcher-snapshot]")
+            stage_results["pitcher_snapshot"] = {"status": "skipped"}
+
         _run_stage(
             3, "predict", stage_predict,
             season, as_of, mode, db_path,
@@ -419,7 +460,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--replace-existing", action="store_true", help="Overwrite existing prediction rows for this date.")
     parser.add_argument("--allow-missing-features", action="store_true", help="Fill missing schema features with 0 instead of failing.")
     parser.add_argument("--skip-collect",  action="store_true", help="Skip Stage 1 (game-log collection).")
-    parser.add_argument("--skip-snapshot", action="store_true", help="Skip Stage 2 (snapshot build).")
+    parser.add_argument("--skip-snapshot", action="store_true", help="Skip Stage 2 (hitter snapshot build).")
+    parser.add_argument("--skip-pitcher-snapshot", action="store_true", help="Skip Stage 2.5 (pitcher snapshot build).")
     parser.add_argument("--skip-verify",   action="store_true", help="Skip Stage 4 (post-run sanity check).")
     parser.add_argument(
         "--run-validation",

@@ -27,11 +27,21 @@ $env:KBO_SEASON = "$season"
 Invoke-PythonStep "collector.run_auto_hitter" @("-m", "collector.run_auto_hitter", "--upsert")
 Invoke-PythonStep "collector.run_auto_pitcher" @("-m", "collector.run_auto_pitcher", "--upsert")
 
-# Sync team schedule from KBO official schedule API for current season
-Invoke-PythonStep "collector.sync_team_schedule" @("-m", "collector.sync_team_schedule", "--db", "kbo_stats.db", "--season", "$season")
+# Sync team schedule from KBO official schedule API for current season (non-fatal)
+try {
+  & $PythonExe -m collector.sync_team_schedule --db kbo_stats.db --season $season
+  if ($LASTEXITCODE -ne 0) { Write-Host "[warn] sync_team_schedule failed (exit $LASTEXITCODE) - continuing" -ForegroundColor Yellow }
+} catch {
+  Write-Host "[warn] sync_team_schedule threw: $_  - continuing" -ForegroundColor Yellow
+}
 
-# Sync team standings snapshot from KBO official standings page
-Invoke-PythonStep "collector.fetch_kbo_team_standings" @("-m", "collector.fetch_kbo_team_standings", "--db", "kbo_stats.db", "--season", "$season", "--source", "auto")
+# Sync team standings snapshot from KBO official standings page (non-fatal)
+try {
+  & $PythonExe -m collector.fetch_kbo_team_standings --db kbo_stats.db --season $season --source auto
+  if ($LASTEXITCODE -ne 0) { Write-Host "[warn] fetch_kbo_team_standings failed (exit $LASTEXITCODE) - continuing" -ForegroundColor Yellow }
+} catch {
+  Write-Host "[warn] fetch_kbo_team_standings threw: $_  - continuing" -ForegroundColor Yellow
+}
 
 $range = @'
 import os
@@ -59,6 +69,7 @@ if ([string]::IsNullOrWhiteSpace($start) -or [string]::IsNullOrWhiteSpace($end) 
 }
 
 Invoke-PythonStep "prediction.build_hitter_snapshots" @("-m", "prediction.build_hitter_snapshots", "--db", "kbo_stats.db", "--season", "$season", "--start", "$start", "--end", "$end", "--upsert")
+Invoke-PythonStep "prediction.build_pitcher_snapshots" @("-m", "prediction.build_pitcher_snapshots", "--db", "kbo_stats.db", "--season", "$season", "--start", "$start", "--end", "$end", "--upsert")
 Invoke-PythonStep "prediction.build_hitter_season_totals" @("-m", "prediction.build_hitter_season_totals", "--db", "kbo_stats.db", "--season", "$season", "--upsert")
 Invoke-PythonStep "prediction.build_pitcher_season_totals" @("-m", "prediction.build_pitcher_season_totals", "--db", "kbo_stats.db", "--season", "$season", "--upsert")
-Invoke-PythonStep "prediction.orchestrate_daily" @("-m", "prediction.orchestrate_daily", "--season", "$season", "--as-of-date", "$asOfDate", "--mode", "prediction", "--replace-existing", "--skip-collect", "--skip-snapshot")
+Invoke-PythonStep "prediction.orchestrate_daily" @("-m", "prediction.orchestrate_daily", "--season", "$season", "--as-of-date", "$asOfDate", "--mode", "prediction", "--replace-existing", "--skip-collect", "--skip-snapshot", "--skip-pitcher-snapshot")

@@ -5,6 +5,7 @@ param(
     [string] $Mode = "prediction",
     [switch] $SkipCollect,
     [switch] $SkipSnapshot,
+    [switch] $SkipPitcherSnapshot,
     [switch] $SkipVerify,
     [switch] $ReplaceExisting,
     [switch] $AllowMissingFeatures,
@@ -15,8 +16,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..")
 
-# Single daily entry-point for hitter E2E pipeline.
-# Runs: collect -> snapshot -> predict -> verify
+# Single daily entry-point for the E2E pipeline (hitter + pitcher).
+# Runs: collect -> snapshot -> pitcher_snapshot -> predict -> verify
 function Assert-LastExit([string]$step) {
     if ($LASTEXITCODE -ne 0) { throw "$step failed with exit code $LASTEXITCODE" }
 }
@@ -60,7 +61,7 @@ print(datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d"))
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  KBO Hitter Daily Pipeline" -ForegroundColor Cyan
+Write-Host "  KBO Daily Pipeline (Hitter + Pitcher)" -ForegroundColor Cyan
 Write-Host "  season=$Season  as_of=$AsOfDate  mode=$Mode  dry_run=$DryRun" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
@@ -74,6 +75,7 @@ $pyArgs = @(
 
 if ($SkipCollect) { $pyArgs += "--skip-collect" }
 if ($SkipSnapshot) { $pyArgs += "--skip-snapshot" }
+if ($SkipPitcherSnapshot) { $pyArgs += "--skip-pitcher-snapshot" }
 if ($SkipVerify) { $pyArgs += "--skip-verify" }
 if ($ReplaceExisting) { $pyArgs += "--replace-existing" }
 if ($AllowMissingFeatures) { $pyArgs += "--allow-missing-features" }
