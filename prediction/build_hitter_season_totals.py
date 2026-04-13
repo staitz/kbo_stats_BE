@@ -42,6 +42,7 @@ def ensure_table(conn) -> None:
             "2B" INTEGER NOT NULL DEFAULT 0,
             "3B" INTEGER NOT NULL DEFAULT 0,
             HR INTEGER NOT NULL DEFAULT 0,
+            R INTEGER NOT NULL DEFAULT 0,
             TB_adj INTEGER NOT NULL DEFAULT 0,
             RBI INTEGER NOT NULL DEFAULT 0,
             BB INTEGER NOT NULL DEFAULT 0,
@@ -66,6 +67,7 @@ def ensure_table(conn) -> None:
     existing = {col.lower() for col in table_columns(conn, "hitter_season_totals")}
     required = {
         "SH": "INTEGER NOT NULL DEFAULT 0",
+        "R": "INTEGER NOT NULL DEFAULT 0",
         "wOBA": "REAL NOT NULL DEFAULT 0",
         "batter_war": "REAL NOT NULL DEFAULT 0",
         "WAR": "REAL NOT NULL DEFAULT 0",
@@ -134,6 +136,7 @@ def _fetch_player_rows(conn, season: int, team: str | None) -> List[object]:
         COALESCE(SUM("2B"), 0) AS "2B",
         COALESCE(SUM("3B"), 0) AS "3B",
         COALESCE(SUM(HR), 0) AS HR,
+        COALESCE(SUM(R), 0) AS R,
         COALESCE(SUM(TB), 0) AS TB,
         COALESCE(SUM(RBI), 0) AS RBI,
         COALESCE(SUM(BB), 0) AS BB,
@@ -223,6 +226,7 @@ def main() -> None:
         sb = int(row_value(row, "SB", 0) or 0)
         cs = int(row_value(row, "CS", 0) or 0)
         gdp = int(row_value(row, "GDP", 0) or 0)
+        r = int(row_value(row, "R", 0) or 0)
 
         avg = _rate(h, ab)
         obp = _rate(h + bb + hbp, ab + bb + hbp + sf)
@@ -243,6 +247,7 @@ def main() -> None:
                 doubles,
                 triples,
                 hr,
+                r,
                 tb_adj,
                 rbi,
                 bb,
@@ -265,11 +270,11 @@ def main() -> None:
 
     sql = """
     INSERT INTO hitter_season_totals (
-        season, team, player_name, games, PA, AB, H, "2B", "3B", HR, TB_adj,
+        season, team, player_name, games, PA, AB, H, "2B", "3B", HR, R, TB_adj,
         RBI, BB, SO, HBP, SH, SF, SB, CS, GDP,
         AVG, OBP, SLG, OPS, wOBA, batter_war, WAR
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(season, team, player_name) DO UPDATE SET
         games=excluded.games,
         PA=excluded.PA,
@@ -278,6 +283,7 @@ def main() -> None:
         "2B"=excluded."2B",
         "3B"=excluded."3B",
         HR=excluded.HR,
+        R=excluded.R,
         TB_adj=excluded.TB_adj,
         RBI=excluded.RBI,
         BB=excluded.BB,
