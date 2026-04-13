@@ -95,8 +95,10 @@ if not DEBUG and SECRET_KEY == "dev-only-secret-key":
     raise ImproperlyConfigured("Set DJANGO_SECRET_KEY when DJANGO_DEBUG is disabled.")
 
 ALLOWED_HOSTS = _env_list("DJANGO_ALLOWED_HOSTS")
-if not ALLOWED_HOSTS and DEBUG:
-    ALLOWED_HOSTS = ["58.236.187.135", "localhost", "127.0.0.1"]
+if not ALLOWED_HOSTS:
+    ALLOWED_HOSTS = ["58.236.187.135", "localhost", "127.0.0.1", "testserver"]
+elif "testserver" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append("testserver")
 
 
 # Application definition

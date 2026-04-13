@@ -809,7 +809,7 @@ def pitcher_leaderboard_rows(
     where_sql = " AND ".join(where)
 
     order_clause = f"{order_metric} ASC"
-    if order_metric in {"W", "SV", "HLD", "SO", "IP"}:
+    if order_metric in {"W", "SV", "HLD", "SO", "IP", "WAR"}:
         order_clause = f"{order_metric} DESC"
 
     return query_all(
@@ -833,7 +833,8 @@ def pitcher_leaderboard_rows(
             ROUND(WHIP, 3) AS WHIP,
             ROUND(K9, 2) AS K9,
             ROUND(BB9, 2) AS BB9,
-            ROUND(KBB, 2) AS KBB
+            ROUND(KBB, 2) AS KBB,
+            ROUND(COALESCE(pitcher_war, WAR), 2) AS WAR
         FROM pitcher_season_totals
         WHERE {where_sql}
         ORDER BY {order_clause}, OUTS DESC, SO DESC, player_name ASC

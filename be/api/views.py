@@ -995,6 +995,7 @@ def leaderboard(request):
             "K9": "K9",
             "BB9": "BB9",
             "KBB": "KBB",
+            "WAR": "WAR",
             "SO": "SO",
             "W": "W",
             "SV": "SV",
@@ -1242,6 +1243,8 @@ def player_detail(request, player_id: str):
                     current_agg = None
                 if current_agg is not None:
                     current_agg["player_name"] = pitcher_name
+                    if totals_prediction and totals_prediction.get("WAR") is not None:
+                        current_agg["WAR"] = float(totals_prediction.get("WAR") or 0)
                 pace_prediction = _estimate_pitcher_projection(
                     current_agg=current_agg,
                     current_row=totals_prediction,

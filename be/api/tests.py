@@ -103,6 +103,7 @@ class ApiEndpointsTest(TestCase):
                     predicted_hr_final REAL NOT NULL DEFAULT 0,
                     predicted_ops_final REAL NOT NULL DEFAULT 0,
                     predicted_war_final REAL NOT NULL DEFAULT 0,
+                    predicted_avg_final REAL NOT NULL DEFAULT 0,
                     confidence_level TEXT NOT NULL DEFAULT 'LOW',
                     confidence_score REAL NOT NULL DEFAULT 0,
                     model_season INTEGER NOT NULL DEFAULT 0,
