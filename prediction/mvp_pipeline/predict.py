@@ -40,6 +40,7 @@ def load_models(model_dir: str | Path) -> dict[str, object]:
         "ops": joblib.load(model_path / "hitter_ops_model.pkl"),
         "hr": joblib.load(model_path / "hitter_hr_model.pkl"),
         "war": joblib.load(model_path / "hitter_war_model.pkl"),
+        "avg": joblib.load(model_path / "hitter_avg_model.pkl"),
     }
 
 
@@ -82,6 +83,12 @@ def make_preseason_projection(snapshot_df: pd.DataFrame, config: AppConfig) -> p
         lower=config.hitter.war_final_min,
         upper=config.hitter.war_final_max,
     )
+    projection["proj_avg"] = blend_anchor_with_current(
+        snapshot_df["prev_season_avg"].where(snapshot_df["prev_season_pa"] > 0, snapshot_df["AVG_to_date"].fillna(0.0)).fillna(0.0),
+        snapshot_df["AVG_to_date"].fillna(0.0),
+        pa,
+        config.hitter.avg_projection_pa_k,
+    ).clip(lower=config.hitter.avg_final_min, upper=config.hitter.avg_final_max)
     return projection
 
 
@@ -173,6 +180,7 @@ def predict_hitter_targets(
     latest["pred_ops_final"] = models["ops"].predict(x_pred)
     latest["pred_hr_final"] = models["hr"].predict(x_pred)
     latest["pred_war_final"] = models["war"].predict(x_pred)
+    latest["pred_avg_final"] = models["avg"].predict(x_pred)
     latest = latest.merge(projection_df, on=["player_key", "player_name", "team", "age"], how="left")
 
     latest["blended_ops_final"], latest["ops_weight"] = blend_projection_and_prediction(
@@ -196,6 +204,13 @@ def predict_hitter_targets(
         lower=cfg.hitter.war_final_min,
         upper=cfg.hitter.war_final_max,
     )
+    latest["blended_avg_final"], latest["avg_weight"] = blend_projection_and_prediction(
+        latest["proj_avg"], latest["pred_avg_final"], latest["PA_cum"], cfg.hitter.avg_blend_pa_k
+    )
+    latest["blended_avg_final"] = latest["blended_avg_final"].clip(
+        lower=cfg.hitter.avg_final_min,
+        upper=cfg.hitter.avg_final_max,
+    )
 
     # In PROJECTION mode, ignore current-season PA and use the projection value only.
     # This produces blend_weight=0 and blended== projection for all players.
@@ -204,9 +219,11 @@ def predict_hitter_targets(
         latest["ops_weight"] = zero
         latest["hr_weight"] = zero
         latest["war_weight"] = zero
+        latest["avg_weight"] = zero
         latest["blended_ops_final"] = latest["proj_ops"]
         latest["blended_hr_final"] = latest["proj_hr"]
         latest["blended_war_final"] = latest["proj_war"]
+        latest["blended_avg_final"] = latest["proj_avg"]
 
     latest["prediction_mode"] = mode
     latest["player_last_game_date"] = latest["game_date"].dt.strftime("%Y-%m-%d")
@@ -219,18 +236,23 @@ def predict_hitter_targets(
         "as_of_date",
         "player_last_game_date",
         "PA_cum",
+        "AVG_to_date",
         "OPS_to_date",
         "HR_cum",
         "WAR_to_date",
+        "proj_avg",
         "proj_ops",
         "proj_hr",
         "proj_war",
+        "pred_avg_final",
         "pred_ops_final",
         "pred_hr_final",
         "pred_war_final",
+        "blended_avg_final",
         "blended_ops_final",
         "blended_hr_final",
         "blended_war_final",
+        "avg_weight",
         "ops_weight",
         "hr_weight",
         "war_weight",
@@ -261,6 +283,7 @@ def ensure_predictions_table(conn) -> None:
             predicted_hr_final REAL NOT NULL DEFAULT 0,
             predicted_ops_final REAL NOT NULL DEFAULT 0,
             predicted_war_final REAL NOT NULL DEFAULT 0,
+            predicted_avg_final REAL NOT NULL DEFAULT 0,
             confidence_level TEXT NOT NULL,
             confidence_score REAL NOT NULL DEFAULT 0,
             model_season INTEGER NOT NULL,
@@ -279,6 +302,7 @@ def ensure_predictions_table(conn) -> None:
     migrations: list[str] = [
         "ALTER TABLE hitter_predictions ADD COLUMN predicted_war_final REAL NOT NULL DEFAULT 0",
         "ALTER TABLE hitter_predictions ADD COLUMN prediction_mode TEXT NOT NULL DEFAULT 'prediction'",
+        "ALTER TABLE hitter_predictions ADD COLUMN predicted_avg_final REAL NOT NULL DEFAULT 0",
     ]
     for stmt in migrations:
         col = stmt.split("ADD COLUMN ")[1].split()[0]
@@ -359,6 +383,7 @@ def upsert_predictions_to_db(
                 float(row.blended_hr_final),
                 float(row.blended_ops_final),
                 float(row.blended_war_final),
+                float(row.blended_avg_final),
                 confidence_level,
                 float(confidence_score),
                 model_season,
@@ -376,16 +401,17 @@ def upsert_predictions_to_db(
         """
         INSERT INTO hitter_predictions (
             season, as_of_date, team, player_name,
-            predicted_hr_final, predicted_ops_final, predicted_war_final,
+            predicted_hr_final, predicted_ops_final, predicted_war_final, predicted_avg_final,
             confidence_level, confidence_score,
             model_season, model_version, created_at,
             pa_to_date, blend_weight, model_source, prediction_mode
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(season, as_of_date, team, player_name, prediction_mode) DO UPDATE SET
             predicted_hr_final=excluded.predicted_hr_final,
             predicted_ops_final=excluded.predicted_ops_final,
             predicted_war_final=excluded.predicted_war_final,
+            predicted_avg_final=excluded.predicted_avg_final,
             confidence_level=excluded.confidence_level,
             confidence_score=excluded.confidence_score,
             model_season=excluded.model_season,

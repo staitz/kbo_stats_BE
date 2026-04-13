@@ -41,11 +41,15 @@ class HitterFeatureConfig:
     ops_projection_pa_k: int = 220
     war_blend_pa_k: int = 120
     war_projection_pa_k: int = 260
+    avg_blend_pa_k: int = 80
+    avg_projection_pa_k: int = 160
     ops_final_min: float = 0.45
     ops_final_max: float = 1.05
     hr_final_max: float = 55.0
     war_final_min: float = -1.0
     war_final_max: float = 12.0
+    avg_final_min: float = 0.100
+    avg_final_max: float = 0.450
     categorical_cols: tuple[str, ...] = ("team",)
     numeric_cols: tuple[str, ...] = (
         "PA",
@@ -60,7 +64,7 @@ class HitterFeatureConfig:
         "SF",
         "TB",
     )
-    target_cols: tuple[str, ...] = ("OPS_final", "HR_final", "WAR_final")
+    target_cols: tuple[str, ...] = ("OPS_final", "HR_final", "WAR_final", "AVG_final")
 
 
 @dataclass(slots=True)

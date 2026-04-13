@@ -24,6 +24,7 @@ TARGET_MAP = {
     "ops": "OPS_final",
     "hr": "HR_final",
     "war": "WAR_final",
+    "avg": "AVG_final",
 }
 
 

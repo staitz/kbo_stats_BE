@@ -228,6 +228,7 @@ class HitterFeatureBuilder:
         ).fillna(0.0)
         df["SLG_to_date"] = _safe_divide(df["TB_cum"], df["AB_cum"]).fillna(0.0)
         df["OPS_to_date"] = df["OBP_to_date"] + df["SLG_to_date"]
+        df["AVG_to_date"] = _safe_divide(df["H_cum"], df["AB_cum"]).fillna(0.0)
         df["BB_rate_to_date"] = _safe_divide(df["BB_cum"], df["PA_cum"]).fillna(0.0)
         df["K_rate_to_date"] = _safe_divide(df["SO_cum"], df["PA_cum"]).fillna(0.0)
         df["ISO_to_date"] = df["SLG_to_date"] - _safe_divide(df["H_cum"], df["AB_cum"]).fillna(0.0)
@@ -286,6 +287,7 @@ class HitterFeatureBuilder:
             .agg(
                 prev_season_pa=("PA_cum", "last"),
                 prev_season_ops=("OPS_to_date", "last"),
+                prev_season_avg=("AVG_to_date", "last"),
                 prev_season_hr=("HR_cum", "last"),
                 prev_season_war=("WAR_to_date", "last"),
             )
@@ -333,6 +335,7 @@ class HitterFeatureBuilder:
         prior_defaults = [
             "prev_season_pa",
             "prev_season_ops",
+            "prev_season_avg",
             "prev_season_hr",
             "prev_season_war",
             "career_pa",
@@ -382,6 +385,7 @@ class HitterFeatureBuilder:
             "days_since_season_start",
             "prev_season_pa",
             "prev_season_ops",
+            "prev_season_avg",
             "prev_season_hr",
             "prev_season_war",
             "career_pa",
@@ -452,6 +456,7 @@ class HitterFeatureBuilder:
                 team=("team", "last"),
                 player_name=("player_name", "last"),
                 OPS_final=("OPS_to_date", "last"),
+                AVG_final=("AVG_to_date", "last"),
                 HR_final=("HR_cum", "last"),
                 WAR_final=("WAR_to_date", "last"),
                 PA_final=("PA_cum", "last"),
