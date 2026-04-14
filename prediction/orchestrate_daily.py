@@ -32,7 +32,7 @@ import json
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -75,13 +75,26 @@ def _stage_fail(name: str, exc: BaseException) -> None:
 # Stage 1 — collect
 # ---------------------------------------------------------------------------
 
-def stage_collect(season: int, dry_run: bool) -> dict[str, Any]:
-    """Run hitter game-log collection for the current season."""
+def stage_collect(season: int, as_of_date: str, dry_run: bool) -> dict[str, Any]:
+    """Run hitter game-log collection for the recent 3 days up to as_of_date."""
+    # Build a 3-day window: (as_of_date - 2 days) to as_of_date
+    if len(as_of_date) > 8:
+        as_of = datetime.fromisoformat(as_of_date)
+    else:
+        as_of = datetime.strptime(as_of_date, "%Y%m%d")
+        
+    start_dt = as_of - timedelta(days=2)
+    start_str = start_dt.strftime("%Y%m%d")
+    end_str = as_of.strftime("%Y%m%d")
+
     if dry_run:
-        _log("  [collect] DRY-RUN: would call collector.run_range_hitter --auto-start --upsert")
+        _log(f"  [collect] DRY-RUN: would call collector.run_range_hitter --start {start_str} --end {end_str} --upsert")
         return {"status": "dry_run"}
 
-    cmd = [sys.executable, "-m", "collector.run_range_hitter", "--auto-start", "--upsert"]
+    cmd = [
+        sys.executable, "-m", "collector.run_range_hitter",
+        "--start", start_str, "--end", end_str, "--upsert"
+    ]
     _log(f"  [collect] {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=_ROOT, capture_output=False)
     if result.returncode != 0:
@@ -373,7 +386,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
 
     try:
         if not args.skip_collect:
-            _run_stage(1, "collect", stage_collect, season, args.dry_run)
+            _run_stage(1, "collect", stage_collect, season, as_of, args.dry_run)
         else:
             _log("\n[STAGE 1/4: COLLECT — SKIPPED via --skip-collect]")
             stage_results["collect"] = {"status": "skipped"}
