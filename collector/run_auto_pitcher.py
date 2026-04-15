@@ -9,7 +9,15 @@ from db_support import connect, fetchone, row_value
 
 
 KST = ZoneInfo("Asia/Seoul")
-DEFAULT_SEASON_START = "20260328"
+
+
+def _current_season_start() -> str:
+    """현재 연도 기준 KBO 정규시즌 시작일 (3월 28일) 반환."""
+    year = dt.datetime.now(KST).year
+    return f"{year}0328"
+
+
+DEFAULT_SEASON_START = _current_season_start()
 
 
 def _today_yyyymmdd_kst() -> str:

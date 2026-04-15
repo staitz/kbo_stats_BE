@@ -17,5 +17,10 @@ prediction/mvp_pipeline/artifacts/predictions/
 artifacts/validation/*_backtest_report.json
 
 # SQLite runtime files
+kbo_stats.db
 kbo_stats.db-wal
 kbo_stats.db-shm
+
+# Python environments & tests
+venv/
+venv_win/
