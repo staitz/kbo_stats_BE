@@ -137,9 +137,14 @@ def leaderboard_candidate_count(season: int, min_pa: int, team: str = "") -> int
     return int((row or {}).get("total") or 0)
 
 
-def pitcher_leaderboard_candidate_count(season: int, min_outs: int, team: str = "") -> int:
-    where = ["season = %s", "OUTS >= %s"]
-    params: list[Any] = [season, min_outs]
+def pitcher_leaderboard_candidate_count(
+    season: int,
+    min_outs: int,
+    team: str = "",
+    min_games: int = 0,
+) -> int:
+    where = ["season = %s", "OUTS >= %s", "games >= %s"]
+    params: list[Any] = [season, min_outs, min_games]
     if team:
         where.append("team = %s")
         params.append(team)
@@ -749,9 +754,14 @@ def leaderboard_total(season: int, min_pa: int, team: str = "") -> int:
     return int((row or {}).get("total") or 0)
 
 
-def pitcher_leaderboard_total(season: int, min_outs: int, team: str = "") -> int:
-    where = ["season = %s", "OUTS >= %s"]
-    params: list[Any] = [season, min_outs]
+def pitcher_leaderboard_total(
+    season: int,
+    min_outs: int,
+    team: str = "",
+    min_games: int = 0,
+) -> int:
+    where = ["season = %s", "OUTS >= %s", "games >= %s"]
+    params: list[Any] = [season, min_outs, min_games]
     if team:
         where.append("team = %s")
         params.append(team)
@@ -800,9 +810,10 @@ def pitcher_leaderboard_rows(
     limit: int,
     offset: int,
     team: str = "",
+    min_games: int = 0,
 ) -> list[dict[str, Any]]:
-    where = ["season = %s", "OUTS >= %s"]
-    params: list[Any] = [season, min_outs]
+    where = ["season = %s", "OUTS >= %s", "games >= %s"]
+    params: list[Any] = [season, min_outs, min_games]
     if team:
         where.append("team = %s")
         params.append(team)
