@@ -660,6 +660,7 @@ def _pick_effective_min_outs_for_leaderboard(
     base_min_outs: int,
     auto_relax: bool,
     min_count: int = 20,
+    min_games: int = 0,
 ) -> int:
     if not auto_relax:
         return base_min_outs
@@ -669,7 +670,12 @@ def _pick_effective_min_outs_for_leaderboard(
     dedup = _descending_tens_candidates(base_min_outs, floor=0)
 
     for candidate in dedup:
-        if repo.pitcher_leaderboard_candidate_count(season=season, min_outs=candidate, team=team) >= min_count:
+        if repo.pitcher_leaderboard_candidate_count(
+            season=season,
+            min_outs=candidate,
+            team=team,
+            min_games=min_games,
+        ) >= min_count:
             return candidate
 
     return dedup[-1]
@@ -952,7 +958,7 @@ def leaderboard(request):
         if missing:
             return _error_json("missing_table", f"required table missing: {', '.join(missing)}", 503)
 
-        if repo.pitcher_leaderboard_candidate_count(season=season, min_outs=0, team=team) == 0:
+        if repo.pitcher_leaderboard_candidate_count(season=season, min_outs=0, team=team, min_games=0) == 0:
             return JsonResponse(
                 {
                     "season": requested_season,
@@ -973,22 +979,6 @@ def leaderboard(request):
                 }
             )
 
-        if min_ip_raw is None or str(min_ip_raw).strip() == "":
-            requested_min_outs = _season_progress_min_outs(season, team)
-            min_ip_policy = "AUTO_BY_SEASON_PROGRESS"
-            min_outs = _pick_effective_min_outs_for_leaderboard(
-                season=season,
-                team=team,
-                base_min_outs=requested_min_outs,
-                auto_relax=True,
-                min_count=20,
-            )
-        else:
-            requested_min_ip = float(request.GET.get("min_ip") or 0)
-            requested_min_outs = int(round(requested_min_ip * 3))
-            min_outs = requested_min_outs
-            min_ip_policy = "MANUAL"
-
         allowed_pitcher_metrics = {
             "ERA": "ERA",
             "WHIP": "WHIP",
@@ -1003,9 +993,39 @@ def leaderboard(request):
             "IP": "IP",
         }
         order_metric = allowed_pitcher_metrics.get(metric, "ERA")
+        is_reliever_metric = order_metric in {"SV", "HLD"}
+
+        if is_reliever_metric:
+            requested_min_outs = 0
+            min_outs = 0
+            min_games = 3
+            min_ip_policy = "MIN_GAMES_FOR_RELIEVERS"
+        elif min_ip_raw is None or str(min_ip_raw).strip() == "":
+            requested_min_outs = _season_progress_min_outs(season, team)
+            min_ip_policy = "AUTO_BY_SEASON_PROGRESS"
+            min_games = 0
+            min_outs = _pick_effective_min_outs_for_leaderboard(
+                season=season,
+                team=team,
+                base_min_outs=requested_min_outs,
+                auto_relax=True,
+                min_count=20,
+                min_games=min_games,
+            )
+        else:
+            requested_min_ip = float(request.GET.get("min_ip") or 0)
+            requested_min_outs = int(round(requested_min_ip * 3))
+            min_outs = requested_min_outs
+            min_games = 0
+            min_ip_policy = "MANUAL"
 
         try:
-            total = repo.pitcher_leaderboard_total(season=season, min_outs=min_outs, team=team)
+            total = repo.pitcher_leaderboard_total(
+                season=season,
+                min_outs=min_outs,
+                team=team,
+                min_games=min_games,
+            )
             rows = repo.pitcher_leaderboard_rows(
                 season=season,
                 min_outs=min_outs,
@@ -1013,6 +1033,7 @@ def leaderboard(request):
                 limit=limit,
                 offset=offset,
                 team=team,
+                min_games=min_games,
             )
             player_id_map = _preferred_player_ids([str(r.get("player_name") or "") for r in rows])
             for row in rows:
@@ -1030,6 +1051,7 @@ def leaderboard(request):
                     "requested_min_ip": round(requested_min_outs / 3.0, 1),
                     "effective_min_ip": round(min_outs / 3.0, 1),
                     "effective_min_outs": min_outs,
+                    "effective_min_games": min_games,
                     "min_ip_policy": min_ip_policy,
                     "team": team or None,
                     "total": total,
