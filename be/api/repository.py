@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import Any
 
 from django.db import connection
+from django.core.cache import cache
 
 
 OPS_WAR_FALLBACK_BASELINE = 0.700
@@ -934,124 +935,94 @@ def _is_english_query(q: str) -> bool:
     return bool(q) and all(ord(c) < 128 for c in q)
 
 
-def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[dict[str, Any]]:
-    team_filter_sql = " AND team = %s" if team else ""
-    team_params: list[Any] = [team] if team else []
+def _get_cached_all_players(season: int) -> list[dict[str, Any]]:
+    cache_key = f"all_players_search_{season}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
 
-    if _is_english_query(q):
-        # ── English query: fetch all players, romanize names in Python, filter ──
-        from .romanize import format_player_name  # lazy import
-
-        q_lower = q.strip().lower()
-
-        # Fetch hitters
-        hitter_rows = query_all(
-            f"""
-            SELECT
-                'hitter' AS player_type,
-                team, player_name, MAX(PA) AS PA, MAX(AB) AS AB, MAX(H) AS H, MAX(HR) AS HR, MAX(OPS) AS OPS,
-                CASE WHEN MAX(AB) > 0 THEN ROUND(1.0 * MAX(H) / MAX(AB), 3) ELSE 0 END AS AVG
-            FROM hitter_season_totals
-            WHERE season IN (%s, %s){team_filter_sql}
-            GROUP BY team, player_name
-            ORDER BY
-                CASE WHEN MAX(PA) >= 100 THEN 1 ELSE 0 END DESC,
-                COALESCE(MAX(OPS), 0) DESC, MAX(PA) DESC
-            """,
-            tuple([season, season - 1] + team_params),
-        )
-
-        # Fetch pitchers (if table exists)
-        pitcher_rows: list[dict[str, Any]] = []
-        if table_exists("pitcher_season_totals"):
-            pitcher_rows = query_all(
-                f"""
-                SELECT
-                    'pitcher' AS player_type,
-                    team, player_name,
-                    NULL AS PA, NULL AS AB, NULL AS H, NULL AS HR, NULL AS OPS, NULL AS AVG
-                FROM pitcher_season_totals
-                WHERE season IN (%s, %s){team_filter_sql}
-                GROUP BY team, player_name
-                ORDER BY MAX(OUTS) DESC
-                """,
-                tuple([season, season - 1] + team_params),
-            )
-
-        # In-memory filter by romanized name
-        matched: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for row in hitter_rows + pitcher_rows:
-            name = str(row.get("player_name") or "").strip()
-            if not name:
-                continue
-            key = f"{row.get('player_type')}:{name}:{row.get('team')}"
-            if key in seen:
-                continue
-            romanized = format_player_name(name, "en").lower()
-            if q_lower in romanized:
-                seen.add(key)
-                matched.append(row)
-            if len(matched) >= limit:
-                break
-
-        return matched[:limit]
-
-    # ── Korean / mixed query: fast SQL LIKE path ──────────────────────────────
-    where = ["season IN (%s, %s)", "player_name LIKE %s"]
-    params: list[Any] = [season, season - 1, f"%{q}%"]
-    if team:
-        where.append("team = %s")
-        params.append(team)
-    where_sql = " AND ".join(where)
-
-    if not table_exists("pitcher_season_totals"):
-        return query_all(
-            f"""
-            SELECT
-                'hitter' AS player_type,
-                team, player_name, MAX(PA) AS PA, MAX(AB) AS AB, MAX(H) AS H, MAX(HR) AS HR, MAX(OPS) AS OPS,
-                CASE WHEN MAX(AB) > 0 THEN ROUND(1.0 * MAX(H) / MAX(AB), 3) ELSE 0 END AS AVG
-            FROM hitter_season_totals
-            WHERE {where_sql}
-            GROUP BY team, player_name
-            ORDER BY
-                CASE WHEN MAX(PA) >= 100 THEN 1 ELSE 0 END DESC,
-                CASE WHEN MAX(AB) > 0 THEN 1.0 * MAX(H) / MAX(AB) ELSE 0 END DESC,
-                COALESCE(MAX(OPS), 0) DESC, MAX(PA) DESC
-            LIMIT %s
-            """,
-            tuple(params + [limit]),
-        )
-
-    return query_all(
+    # Fetch hitters
+    hitter_rows = query_all(
         f"""
-        SELECT player_type, team, player_name, MAX(PA) AS PA, MAX(AB) AS AB, MAX(H) AS H, MAX(HR) AS HR, MAX(OPS) AS OPS, MAX(AVG) AS AVG
-        FROM (
-            SELECT
-                'hitter' AS player_type,
-                team, player_name, PA, AB, H, HR, OPS,
-                CASE WHEN AB > 0 THEN ROUND(1.0 * H / AB, 3) ELSE NULL END AS AVG
-            FROM hitter_season_totals
-            WHERE {where_sql}
-            UNION ALL
+        SELECT
+            'hitter' AS player_type,
+            team, player_name, MAX(PA) AS PA, MAX(AB) AS AB, MAX(H) AS H, MAX(HR) AS HR, MAX(OPS) AS OPS,
+            CASE WHEN MAX(AB) > 0 THEN ROUND(1.0 * MAX(H) / MAX(AB), 3) ELSE 0 END AS AVG
+        FROM hitter_season_totals
+        WHERE season IN (%s, %s)
+        GROUP BY team, player_name
+        """,
+        (season, season - 1),
+    )
+
+    # Fetch pitchers (if table exists)
+    pitcher_rows: list[dict[str, Any]] = []
+    if table_exists("pitcher_season_totals"):
+        pitcher_rows = query_all(
+            f"""
             SELECT
                 'pitcher' AS player_type,
                 team, player_name,
                 NULL AS PA, NULL AS AB, NULL AS H, NULL AS HR, NULL AS OPS, NULL AS AVG
             FROM pitcher_season_totals
-            WHERE {where_sql}
+            WHERE season IN (%s, %s)
+            GROUP BY team, player_name
+            """,
+            (season, season - 1),
         )
-        GROUP BY player_type, team, player_name
-        ORDER BY
-            CASE WHEN player_type = 'hitter' AND MAX(PA) >= 100 THEN 2
-                 WHEN player_type = 'hitter' THEN 1
-                 ELSE 0 END DESC,
-            COALESCE(MAX(OPS), 0) DESC, MAX(PA) DESC
-        LIMIT %s
-        """,
-        tuple(params + params + [limit]),
-    )
+
+    all_players = hitter_rows + pitcher_rows
+
+    def _sort_key(r):
+        return (
+            2 if r.get("player_type") == "hitter" and (r.get("PA") or 0) >= 100 else (1 if r.get("player_type") == "hitter" else 0),
+            float(r.get("OPS") or 0),
+            float(r.get("PA") or 0)
+        )
+
+    all_players.sort(key=_sort_key, reverse=True)
+    cache.set(cache_key, all_players, 60 * 5)  # Cache for 5 minutes
+    return all_players
+
+
+def player_search_rows(season: int, q: str, limit: int, team: str = "") -> list[dict[str, Any]]:
+    all_players = _get_cached_all_players(season)
+    
+    is_english = _is_english_query(q)
+    q_lower = q.strip().lower() if is_english else q.strip()
+    
+    if is_english:
+        from .romanize import format_player_name  # lazy import
+        
+    matched: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    
+    for row in all_players:
+        if team and row.get("team") != team:
+            continue
+            
+        name = str(row.get("player_name") or "").strip()
+        if not name:
+            continue
+            
+        key = f"{row.get('player_type')}:{name}:{row.get('team')}"
+        if key in seen:
+            continue
+            
+        if is_english:
+            romanized = format_player_name(name, "en").lower()
+            if q_lower in romanized:
+                seen.add(key)
+                matched.append(row)
+        else:
+            if q_lower in name:
+                seen.add(key)
+                matched.append(row)
+                
+        if len(matched) >= limit:
+            break
+            
+    return matched
 
 
 
