@@ -117,6 +117,10 @@ def _safe_float(text: str) -> float:
     return float(clean)
 
 
+def _is_hold_result(result_text: str) -> bool:
+    return str(result_text or "").strip() in {"홀", "홀드"}
+
+
 def _infer_teams_from_game_id(game_id: str) -> Tuple[str, str]:
     gid = str(game_id or "").strip()
     if len(gid) < 12:
@@ -218,7 +222,7 @@ def _fetch_rows_from_kbo_boxscore(
                     "W": int(result_text == "승"),
                     "L": int(result_text == "패"),
                     "SV": int(result_text == "세"),
-                    "HLD": int(result_text == "홀"),
+                    "HLD": int(_is_hold_result(result_text)),
                     "IP": round(outs / 3.0, 4),
                     "OUTS": outs,
                     "BF": _safe_int(cells[col_idx.get("타자", -1)]) if "타자" in col_idx else 0,
