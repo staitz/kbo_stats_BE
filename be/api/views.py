@@ -5,6 +5,7 @@ from typing import Any
 from django.db import DatabaseError
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET
+from django.views.decorators.cache import cache_page
 from zoneinfo import ZoneInfo
 
 from . import repository as repo
@@ -1175,6 +1176,7 @@ def predictions_latest(request):
 
 
 @require_GET
+@cache_page(60 * 5)  # 5분 로컬 메모리 캐시 적용 (자동완성 Latency 최소화)
 def player_search(request):
     q = str(request.GET.get("q", "")).strip()
     season = _parse_int(request.GET.get("season"), _default_season(), min_value=1982, max_value=2100)
