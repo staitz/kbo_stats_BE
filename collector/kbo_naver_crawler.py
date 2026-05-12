@@ -173,12 +173,20 @@ def fetch_game_record(
     game_id: str,
     debug: bool = False,
 ) -> Dict[str, Any]:
-    url = f"{BASE_URL}/schedule/games/kbo/{game_id}/record"
+    # Primary: without /kbo/ prefix (current working endpoint as of 2026-05)
+    url = f"{BASE_URL}/schedule/games/{game_id}/record"
     data = fetch_json(url)
-    if not data or "result" not in data:
+    record_data = ((data or {}).get("result") or {}).get("recordData") or {}
+    if isinstance(record_data, dict) and record_data:
+        return record_data
+
+    # Fallback: with /kbo/ prefix (legacy, may work for older game IDs)
+    url_legacy = f"{BASE_URL}/schedule/games/kbo/{game_id}/record"
+    data_legacy = fetch_json(url_legacy)
+    if not data_legacy or "result" not in data_legacy:
         return {}
 
-    record_data = (data.get("result") or {}).get("recordData") or {}
+    record_data = (data_legacy.get("result") or {}).get("recordData") or {}
     return record_data if isinstance(record_data, dict) else {}
 
 
