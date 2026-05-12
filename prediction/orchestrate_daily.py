@@ -4,11 +4,13 @@ orchestrate_daily.py — Daily E2E Prediction Pipeline
 
 Chains stages into a single idempotent run:
 
-  Stage 1 [collect]           Update game_logs from today's KBO results
-  Stage 2 [snapshot]          Build/update hitter_daily_snapshots
-  Stage 2.5 [pitcher_snapshot] Build/update pitcher_daily_snapshots
-  Stage 3 [predict]           Run hitter MVP prediction → hitter_predictions DB
-  Stage 4 [verify]            Post-run sanity check (row counts / nulls / distribution)
+  Stage 1   [collect]           Update game_logs from today's KBO results
+  Stage 2   [snapshot]          Build/update hitter_daily_snapshots
+  Stage 2.5 [pitcher_snapshot]  Build/update pitcher_daily_snapshots
+  Stage 3   [predict]           Run hitter MVP prediction → hitter_predictions DB
+  Stage 3.5 [pitcher_predict]   Run pitcher prediction → pitcher_predictions DB
+  Stage 4   [season_totals]     Rebuild hitter/pitcher season totals from game logs
+  Stage 5   [verify]            Post-run sanity check (row counts / nulls / distribution)
 
 Usage examples
 --------------
@@ -240,7 +242,101 @@ def stage_predict(
 
 
 # ---------------------------------------------------------------------------
-# Stage 4 — verify
+# Stage 3.5 — pitcher predict
+# ---------------------------------------------------------------------------
+
+def stage_pitcher_predict(
+    season: int,
+    as_of_date: str,
+    db_path: Path,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Run pitcher prediction (ERA/WHIP/WAR) and upsert to pitcher_predictions."""
+    if dry_run:
+        _log(
+            f"  [pitcher_predict] DRY-RUN: would predict pitcher season={season} "
+            f"as_of={as_of_date}"
+        )
+        return {"status": "dry_run", "rows": 0, "upserted": 0}
+
+    from .pitcher_pipeline.predict import predict_latest
+    from .pitcher_pipeline.dataset import upsert_predictions
+
+    as_of_yyyymmdd = as_of_date.replace("-", "")
+    predictions = predict_latest(
+        db_path=str(db_path),
+        season=season,
+        as_of_date=as_of_yyyymmdd,
+    )
+    _log(f"  [pitcher_predict] generated {len(predictions)} prediction rows")
+
+    with connect_for_path(db_path) as conn:
+        # Ensure UNIQUE index exists for ON CONFLICT upsert
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_pitcher_predictions "
+            "ON pitcher_predictions(season, as_of_date, team, player_name)"
+        )
+        conn.commit()
+        upserted = upsert_predictions(conn, predictions)
+
+    _log(f"  [pitcher_predict] upserted {upserted} rows → pitcher_predictions")
+    return {
+        "status": "ok",
+        "rows_predicted": int(len(predictions)),
+        "rows_upserted": upserted,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 — season totals
+# ---------------------------------------------------------------------------
+
+def stage_season_totals(
+    season: int,
+    db_path: Path,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Rebuild hitter_season_totals and pitcher_season_totals from game logs."""
+    if dry_run:
+        _log(f"  [season_totals] DRY-RUN: would rebuild season totals for {season}")
+        return {"status": "dry_run"}
+
+    results = {}
+    # Hitter season totals
+    cmd_hitter = [
+        sys.executable, "-m", "prediction.build_hitter_season_totals",
+        "--db", str(db_path),
+        "--season", str(season),
+        "--upsert",
+    ]
+    _log(f"  [season_totals] {' '.join(cmd_hitter)}")
+    r1 = subprocess.run(cmd_hitter, cwd=_ROOT, capture_output=True, text=True)
+    if r1.returncode != 0:
+        _log(f"  [season_totals] hitter totals WARNING: {r1.stderr.strip()}")
+    else:
+        _log(f"  [season_totals] hitter totals OK: {r1.stdout.strip()}")
+    results["hitter"] = "ok" if r1.returncode == 0 else "error"
+
+    # Pitcher season totals
+    cmd_pitcher = [
+        sys.executable, "-m", "prediction.build_pitcher_season_totals",
+        "--db", str(db_path),
+        "--season", str(season),
+        "--upsert",
+    ]
+    _log(f"  [season_totals] {' '.join(cmd_pitcher)}")
+    r2 = subprocess.run(cmd_pitcher, cwd=_ROOT, capture_output=True, text=True)
+    if r2.returncode != 0:
+        _log(f"  [season_totals] pitcher totals WARNING: {r2.stderr.strip()}")
+    else:
+        _log(f"  [season_totals] pitcher totals OK: {r2.stdout.strip()}")
+    results["pitcher"] = "ok" if r2.returncode == 0 else "error"
+
+    return {"status": "ok", **results}
+
+
+# ---------------------------------------------------------------------------
+# Stage 5 — verify
 # ---------------------------------------------------------------------------
 
 def stage_verify(season: int, as_of_date: str, mode: str, db_path: Path) -> dict[str, Any]:
@@ -366,7 +462,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     as_of   = args.as_of_date
     mode    = args.mode
 
-    total_stages = 5 if args.run_validation else 4
+    total_stages = 7 if args.run_validation else 6
     stage_results: dict[str, Any] = {}
     pipeline_start = time.monotonic()
 
@@ -388,36 +484,44 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         if not args.skip_collect:
             _run_stage(1, "collect", stage_collect, season, as_of, args.dry_run)
         else:
-            _log("\n[STAGE 1/4: COLLECT — SKIPPED via --skip-collect]")
+            _log(f"\n[STAGE 1/{total_stages}: COLLECT — SKIPPED via --skip-collect]")
             stage_results["collect"] = {"status": "skipped"}
 
         if not args.skip_snapshot:
             _run_stage(2, "snapshot", stage_snapshot, season, as_of, db_path, args.dry_run)
         else:
-            _log("\n[STAGE 2/4: SNAPSHOT — SKIPPED via --skip-snapshot]")
+            _log(f"\n[STAGE 2/{total_stages}: SNAPSHOT — SKIPPED via --skip-snapshot]")
             stage_results["snapshot"] = {"status": "skipped"}
 
         if not args.skip_pitcher_snapshot:
-            _run_stage(2, "pitcher_snapshot", stage_pitcher_snapshot, season, as_of, db_path, args.dry_run)
+            _run_stage(3, "pitcher_snapshot", stage_pitcher_snapshot, season, as_of, db_path, args.dry_run)
         else:
-            _log("\n[STAGE 2.5: PITCHER_SNAPSHOT — SKIPPED via --skip-pitcher-snapshot]")
+            _log(f"\n[STAGE 3/{total_stages}: PITCHER_SNAPSHOT — SKIPPED via --skip-pitcher-snapshot]")
             stage_results["pitcher_snapshot"] = {"status": "skipped"}
 
         _run_stage(
-            3, "predict", stage_predict,
+            4, "predict", stage_predict,
             season, as_of, mode, db_path,
             args.replace_existing, args.allow_missing_features, args.dry_run,
         )
 
+        if not args.skip_pitcher_predict:
+            _run_stage(5, "pitcher_predict", stage_pitcher_predict, season, as_of, db_path, args.dry_run)
+        else:
+            _log(f"\n[STAGE 5/{total_stages}: PITCHER_PREDICT — SKIPPED via --skip-pitcher-predict]")
+            stage_results["pitcher_predict"] = {"status": "skipped"}
+
+        _run_stage(6, "season_totals", stage_season_totals, season, db_path, args.dry_run)
+
         if not args.skip_verify and not args.dry_run:
-            _run_stage(4, "verify", stage_verify, season, as_of, mode, db_path)
+            _run_stage(7, "verify", stage_verify, season, as_of, mode, db_path)
         else:
             reason = "--dry-run" if args.dry_run else "--skip-verify"
-            _log(f"\n[STAGE 4/{total_stages}: VERIFY — SKIPPED via {reason}]")
+            _log(f"\n[STAGE 7/{total_stages}: VERIFY — SKIPPED via {reason}]")
             stage_results["verify"] = {"status": "skipped"}
 
         if args.run_validation and not args.dry_run:
-            _stage_header(5, total_stages, "validate (quality)")
+            _stage_header(total_stages, total_stages, "validate (quality)")
             t0 = time.monotonic()
             try:
                 val_result = stage_validate(season, as_of, mode, db_path)
@@ -428,7 +532,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
                 _log(f"  [validate] WARNING exception: {exc} (pipeline not aborted)")
                 stage_results["validate"] = {"status": "warn", "message": str(exc)}
         elif args.run_validation and args.dry_run:
-            _log(f"\n[STAGE 5/{total_stages}: VALIDATE — SKIPPED via --dry-run]")
+            _log(f"\n[STAGE {total_stages}/{total_stages}: VALIDATE — SKIPPED via --dry-run]")
             stage_results["validate"] = {"status": "skipped"}
 
         status = "success"
@@ -458,7 +562,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Hitter daily E2E prediction pipeline: collect → snapshot → predict → verify",
+        description="Daily E2E prediction pipeline: collect → snapshot → predict (hitter+pitcher) → season_totals → verify",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--season", type=int, required=True, help="Target season year (e.g. 2025).")
@@ -474,8 +578,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-missing-features", action="store_true", help="Fill missing schema features with 0 instead of failing.")
     parser.add_argument("--skip-collect",  action="store_true", help="Skip Stage 1 (game-log collection).")
     parser.add_argument("--skip-snapshot", action="store_true", help="Skip Stage 2 (hitter snapshot build).")
-    parser.add_argument("--skip-pitcher-snapshot", action="store_true", help="Skip Stage 2.5 (pitcher snapshot build).")
-    parser.add_argument("--skip-verify",   action="store_true", help="Skip Stage 4 (post-run sanity check).")
+    parser.add_argument("--skip-pitcher-snapshot", action="store_true", help="Skip Stage 3 (pitcher snapshot build).")
+    parser.add_argument("--skip-pitcher-predict", action="store_true", help="Skip Stage 5 (pitcher ML prediction).")
+    parser.add_argument("--skip-verify",   action="store_true", help="Skip Stage 7 (post-run sanity check).")
     parser.add_argument(
         "--run-validation",
         action="store_true",
