@@ -25,3 +25,5 @@ kbo_stats.db-shm
 # Python environments & tests
 venv/
 venv_win/
+
+db.sqlite3
