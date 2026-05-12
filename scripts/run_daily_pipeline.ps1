@@ -73,3 +73,4 @@ Invoke-PythonStep "prediction.build_pitcher_snapshots" @("-m", "prediction.build
 Invoke-PythonStep "prediction.build_hitter_season_totals" @("-m", "prediction.build_hitter_season_totals", "--db", "kbo_stats.db", "--season", "$season", "--upsert")
 Invoke-PythonStep "prediction.build_pitcher_season_totals" @("-m", "prediction.build_pitcher_season_totals", "--db", "kbo_stats.db", "--season", "$season", "--upsert")
 Invoke-PythonStep "prediction.orchestrate_daily" @("-m", "prediction.orchestrate_daily", "--season", "$season", "--as-of-date", "$asOfDate", "--mode", "prediction", "--replace-existing", "--skip-collect", "--skip-snapshot", "--skip-pitcher-snapshot")
+
